@@ -15,7 +15,7 @@ responde sin apartar la vista.
 ## Instalación (Windows 10/11, x64)
 
 1. Descarga `MindVoice-<versión>-setup.exe` desde la pestaña
-   [Releases](../../releases).
+   [Releases](https://github.com/MindConall/mindvoice/releases).
 2. Doble clic.
 
 Se instala **por usuario**: no pide permisos de administrador y no necesitas
@@ -244,4 +244,4 @@ es un incumplimiento y hay formas de reclamar.
 - **[google-genai](https://github.com/googleapis/python-genai)** — SDK oficial.
 - **[Inno Setup](https://jrsoftware.org/isinfo.php)** — compilador del
   instalador.
-- Toda la gente que terció en [issues](../../issues) y pull requests.
+- Toda la gente que terció en [issues](https://github.com/MindConall/mindvoice/issues) y pull requests.
