@@ -273,6 +273,70 @@ function Invoke-InnoSetup {
 }
 
 # ---------------------------------------------------------------------------
+# 5. Prueba de humo del árbol empaquetado
+# ---------------------------------------------------------------------------
+<#
+    Importa TODOS los módulos con el runtime embebido, simulando cómo arranca
+    de verdad la app instalada.
+
+    Esto no es opcional ni decorativo: el runtime de Python embebido no añade
+    la carpeta del script a sys.path (manda pythonXY._pth), así que un simple
+    desajuste entre lo que copia Inno y lo que espera el ._pth rompe el arranque
+    entero con un "ModuleNotFoundError: No module named 'config'" que en el
+    usuario final solo se ve como "no pasa nada al hacer doble clic". Es un
+    fallo silencioso, y la única defensa es probarlo antes de publicar.
+#>
+function Test-Package {
+    Write-Step 'Probando el árbol empaquetado con el runtime embebido'
+
+    $probe = Join-Path $env:TEMP 'mindvoice-smoke.py'
+    @'
+import sys, os
+APP = os.environ["MV_APP"]
+RUNTIME = os.environ["MV_RUNTIME"]
+sys.path.insert(0, APP)
+# Reproduce el arranque real: pythonw.exe <app>\MindVoice.py
+import MindVoice, start_mindvoice, launcher, overlay, live_assistant
+import config, prefs, credenciales, firstrun, rutas, hotkeys, branding
+from media import AudioPlayer, MicrophoneCapture, ScreenCapture
+import google.genai, mss, pyaudio, keyboard
+from PyQt6 import QtWidgets
+
+# Ojo: rutas.app_dir() y python_exe() devuelven pathlib.Path, y un Path nunca
+# es igual a un str aunque apunten al mismo sitio. Hay que convertir con str().
+assert str(MindVoice.APP_DIR) == APP, (MindVoice.APP_DIR, APP)
+assert str(rutas.app_dir()) == APP, (rutas.app_dir(), APP)
+# El intérprete que lanzará los hijos debe ser el runtime embebido, no un
+# .venv de desarrollo: si no lo es, el lanzador arranca con una ruta ajena.
+assert str(rutas.python_exe(True)) == os.path.join(RUNTIME, "pythonw.exe"), rutas.python_exe(True)
+assert os.path.exists(branding.LOGO_ICO), "falta el icono"
+assert credenciales.secrets_path().name == "secrets.json"
+print("SMOKE OK")
+'@ | Set-Content -Path $probe -Encoding UTF8
+
+    try {
+        $env:MV_APP = $AppOut
+        $env:MV_RUNTIME = $Runtime
+        # stderr va a fichero: con 2>&1 sobre un comando nativo, PowerShell lo
+        # envuelve en NativeCommandError y el traceback de Python queda
+        # ilegible justo cuando más falta hace.
+        $errFile = "$probe.err"
+        $salida = & (Join-Path $Runtime 'python.exe') $probe 2> $errFile
+        $codigo = $LASTEXITCODE
+        $err = if (Test-Path $errFile) { Get-Content $errFile -Raw } else { '' }
+        if ($codigo -ne 0 -or ($salida -notmatch 'SMOKE OK')) {
+            Write-Host $err -ForegroundColor Red
+            throw "El paquete no arranca: la prueba de humo ha fallado (codigo $codigo). NO publiques esto."
+        }
+        Write-Host '    SMOKE OK: todos los módulos importan y las rutas resuelven' -ForegroundColor Green
+    }
+    finally {
+        Remove-Item $probe, "$probe.err" -EA SilentlyContinue
+        Remove-Item Env:MV_APP, Env:MV_RUNTIME -EA SilentlyContinue
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Orquestación
 # ---------------------------------------------------------------------------
 Write-Host "Construyendo MindVoice $(Get-AppVersion)" -ForegroundColor Green
@@ -283,6 +347,7 @@ Install-Requirements
 Enable-SiteImports          # de nuevo: pip pudo reescribir el ._pth
 Copy-AppSource
 Assert-NoSecrets
+Test-Package
 
 Write-Host ''
 Write-Host "    staging listo en $Staging" -ForegroundColor Green

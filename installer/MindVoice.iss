@@ -78,7 +78,14 @@ Source: "{#SourceRoot}\runtime\*"; DestDir: "{app}\runtime"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Código de la app, assets, licencia y README.
-Source: "{#SourceRoot}\app\*"; DestDir: "{app}"; \
+;
+; OJO: el destino es {app}\app y NO {app}. Tiene que replicar el árbol de
+; staging exactamente, porque el runtime embebido no añade la carpeta del
+; script a sys.path: la encuentra por la línea "..\app" de pythonXY._pth, que
+; es relativa a la carpeta runtime. Aplanar el código a {app} dejaba esa
+; línea apuntando a {app}\..\app y el lanzador moría con
+; "ModuleNotFoundError: No module named 'config'".
+Source: "{#SourceRoot}\app\*"; DestDir: "{app}\app"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
@@ -89,29 +96,41 @@ Name: "{localappdata}\{#AppName}"
 [Icons]
 ; Acceso directo del Menú Inicio: abre el lanzador y, con ello, el overlay.
 Name: "{group}\{#AppName}"; Filename: "{app}\runtime\{#AppExeName}"; \
-    Parameters: """{app}\MindVoice.py"""; WorkingDir: "{app}"; \
-    IconFilename: "{app}\assets\mindvoice_logo.ico"
+    Parameters: """{app}\app\MindVoice.py"""; WorkingDir: "{app}\app"; \
+    IconFilename: "{app}\app\assets\mindvoice_logo.ico"
 
 Name: "{group}\Desinstalar {#AppName}"; Filename: "{uninstallexe}"
 
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\runtime\{#AppExeName}"; \
-    Parameters: """{app}\MindVoice.py"""; WorkingDir: "{app}"; \
-    IconFilename: "{app}\assets\mindvoice_logo.ico"; Tasks: desktopicon
+    Parameters: """{app}\app\MindVoice.py"""; WorkingDir: "{app}\app"; \
+    IconFilename: "{app}\app\assets\mindvoice_logo.ico"; Tasks: desktopicon
 
 Name: "{userstartup}\{#AppName}"; Filename: "{app}\runtime\{#AppExeName}"; \
-    Parameters: """{app}\MindVoice.py"""; WorkingDir: "{app}"; \
-    IconFilename: "{app}\assets\mindvoice_logo.ico"; Tasks: autostart
+    Parameters: """{app}\app\MindVoice.py"""; WorkingDir: "{app}\app"; \
+    IconFilename: "{app}\app\assets\mindvoice_logo.ico"; Tasks: autostart
 
 [Run]
 ; Se ejecuta siempre al terminar (salvo que el usuario cancele el reinicio):
 ; así la app aparece ya abierta y pide la clave de Gemini en ese momento, en
 ; lugar de esperar al próximo doble clic.
-Filename: "{app}\runtime\{#AppExeName}"; Parameters: """{app}\MindVoice.py"""; \
-    WorkingDir: "{app}"; Description: "Iniciar {#AppName}"; \
+Filename: "{app}\runtime\{#AppExeName}"; Parameters: """{app}\app\MindVoice.py"""; \
+    WorkingDir: "{app}\app"; Description: "Iniciar {#AppName}"; \
     Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; Registros de la instalación anterior: ahora viven en {localappdata}\MindVoice
-; y se conservan para no perder la memoria ni la clave al desinstalar. El
-; instalador ofrece borrarlos explícitamente (ver código en [Code]).
+; Lo que aparece en [Files] lo borra Inno solo, porque lo rastrea. Esto solo
+; limpia lo que NO está registrado y por tanto se quedaría huérfano:
+;   - __pycache__: lo genera el primer arranque dentro de {app}\app
+;   - restos de una versión anterior con otro layout
+;
+; NO se pide borrar {app} completa: el desinstalador se está ejecutando desde
+; justo ahí (unins000.exe) y no puede eliminarse a sí mismo, así que Inno
+; deja la carpeta vacía. Es inocuo y evita un fallo de borrado silencioso.
+Type: filesandordirs; Name: "{app}\app"
 Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\__pycache__"
+
+; Los datos del usuario (memoria, clave cifrada, ajustes, transcripciones) viven
+; aparte en {localappdata}\MindVoice y se conservan a propósito: desinstalar no
+; debe tirar la memoria ni obligar a reconfigurar la clave. Para borrarlo todo,
+; desinstalar y eliminar esa carpeta a mano.
