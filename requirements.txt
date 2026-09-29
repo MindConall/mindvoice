@@ -1,0 +1,19 @@
+# SDK oficial de Google para Gemini (incluye el soporte WebSocket / Live).
+google-genai>=1.0.0
+
+# Captura de audio de entrada/salida (requiere PortAudio en Linux).
+pyaudio>=0.2.14
+
+# Captura rápida de la pantalla (funciona en Windows, macOS y Linux/X11).
+mss>=9.0.0
+
+# Redimensionado y codificación JPEG de los fotogramas de pantalla.
+Pillow>=10.0.0
+
+# Detección de teclas globales (push-to-talk/mute).
+# NOTA Linux: requiere ejecutarse como root o permisos de /dev/input.
+keyboard>=0.13.5
+
+# Overlay HUD (Windows 11): ventana transparente y siempre encima.
+# El hotkey global usa RegisterHotKey (Win32) vía ctypes, sin dependencias extra.
+PyQt6>=6.11.0

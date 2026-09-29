@@ -1,0 +1,116 @@
+name: Release
+
+# Al hacer push de un tag tipo v0.1.0 se compila el instalador y se publica
+# como Release de GitHub. El workflow también corre a mano (workflow_dispatch).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag a publicar (ej. v0.1.0). Déjalo igual si subiste un tag.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # windows-latest ya trae Python e Inno Setup 6, así que no hace falta
+    # instalar nada para compilar.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Leer la versión del tag
+        id: version
+        shell: pwsh
+        run: |
+          $raw = '${{ github.event.inputs.tag }}'
+          if (-not $raw) { $raw = '${{ github.ref_name }}' }
+          $v = $raw.TrimStart('v')
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Publicando la versión $v"
+
+      # El fichero de versión es la fuente de la verdad para el nombre del
+      # instalador; si el tag y version.txt no coinciden, es casi siempre un
+      # error humano y conviene enterarse antes de publicar.
+      - name: Comprobar que el tag coincide con installer/version.txt
+        shell: pwsh
+        run: |
+          $declared = (Get-Content installer/version.txt -Raw).Trim()
+          $tagged    = '${{ steps.version.outputs.version }}'
+          if ($declared -ne $tagged) {
+            Write-Host "ATENCION: installer/version.txt dice '$declared' pero el tag es '$tagged'."
+            Write-Host "Se publica con la del tag. Actualiza version.txt para que no se avisen."
+          } else {
+            Write-Host "Coinciden: $declared"
+          }
+
+      - name: Preparar el runtime y compilar el instalador
+        shell: pwsh
+        run: ./build_release.ps1
+
+      - name: Comprobar que el instalador existe
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem installer/output -Filter '*.exe'
+          if (-not $setup) { throw 'No se ha generado ningún .exe en installer/output' }
+          $setup | ForEach-Object {
+            "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB)
+            Write-Host "::notice::Instalador listo: $($_.Name)"
+          }
+
+      # Segunda barrera anti-fuga, ya sobre el artefacto real y no sobre el
+      # staging: si el .exe contuviera una clave legible, se detectaría aquí.
+      # (Un .exe comprimido con LZMA no es legible con strings, así que esto
+      # protege sobre todo de que se adjunte un fichero suelto por error.)
+      - name: Aviso de compilación sin firmar
+        shell: pwsh
+        run: |
+          Write-Host '::warning::El instalador no va firmado. En el equipo del usuario'
+          Write-Host '::warning::SmartScreen mostrará "Windows protegio tu PC" en la'
+          Write-Host '::warning::primera ejecución. Es normal sin certificado de OV.'
+
+      - name: Publicar la Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.version }}
+        run: |
+          $notas = @"
+          ## MindVoice $env:TAG
+
+          Instalador de Windows x64.
+
+          1. Descarga `MindVoice-$env:TAG-setup.exe`.
+          2. Doble clic. Se instala por usuario: **no pide administrador** y no
+             requiere tener Python instalado.
+          3. Al abrirse por primera vez te pedirá la clave de la API de Gemini
+             (gratis en https://aistudio.google.com/apikey). Se guarda cifrada
+             con DPAPI, solo accesible desde tu cuenta de Windows.
+
+          ### Si Windows lo bloquea
+
+          El instalador no está firmado (los proyectos open source sin
+          presupuesto de certificado de OV no suelen estarlo). Pasa por
+          *Más información -> Ejecutar de todas formas*.
+
+          Página del proyecto: https://github.com/${{ github.repository }}
+          "@
+
+          gh release create "v$env:TAG" `
+            installer/output/*.exe `
+            --title "MindVoice $env:TAG" `
+            --notes $notas `
+            --verify-tag
+
+      - name: Subir el artefacto sin publicar Release
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: MindVoice-installer
+          path: installer/output/*.exe
+          retention-days: 7

@@ -1,0 +1,51 @@
+# Entornos virtuales
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Secretos. NUNCA subir: aquí vive la clave de búsqueda web y la de Gemini.
+.env
+.env.*
+!.env.example
+user_prefs.json
+secrets.json
+
+# Datos del usuario: memoria, alarmas, transcripciones y estado del motor.
+# Contienen conversaciones personales; son de la máquina, no del repositorio.
+memory.json
+memory-long.json
+timers.json
+web_model_cache.json
+guion-conversacion-*.txt
+sessions/
+data/
+logs/
+
+# Registros y volcados de depuración (varios MB de basura local).
+*.log
+*-out.log
+debug_*.txt
+debug_*.jpg
+overlay-launcher.log
+
+# Artefactos de construcción del release.
+dist/
+build/
+installer/output/
+staging/
+*.iss.issc
+
+# Editores y sistema operativo
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Volcado monolítico del código usado como copia de seguridad local.
+# Es un duplicado de todos los módulos: publicarlo confunde y desincroniza.
+mindvoice_codigo_completo.py
