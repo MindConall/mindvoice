@@ -237,6 +237,22 @@ es un incumplimiento y hay formas de reclamar.
 
 ---
 
+## Autoría
+
+**Idea, diseño, código y decisiones: [MindConall](https://github.com/MindConall).**
+
+El trabajo de preparación para publicar el proyecto —rutas de datos,
+almacenamiento cifrado de la clave, asistente de primera ejecución,
+empaquetado con Python embebido, instalador, workflow de release y esta
+documentación— se hizo con asistencia de **OpenCode**, un agente de
+programación con IA. Los commits están firmados por MindConall porque es su
+proyecto y su criterio, no porque la IA sea autora de las decisiones.
+
+En los commits que despliegue código de la IA, el cuerpo incluye un rastro
+`Co-Authored-By` para que se pueda ver qué líneas no las escribió una persona.
+
+---
+
 ## Agradecimientos
 
 - **Google Gemini** — API multimodal en vivo con audio nativo
