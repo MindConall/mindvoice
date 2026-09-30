@@ -2825,7 +2825,9 @@ class LiveAssistant:
                             ),
                         )
                 # Instrumentación de rendimiento (Fase 0): cuánto contexto se
-                # manda en este turno. Apagada salvo MINDVOICE_PERF=1.
+                # manda en este turno. Apagada salvo MINDVOICE_PERF=1 o el
+                # panel de diagnóstico del HUD (Ctrl+Shift+D), que la enciende
+                # en caliente.
                 #
                 # Va en su propio try/except a propósito: si la métrica falla,
                 # la excepción caía en el `except` del turno, que descarta la
@@ -2833,7 +2835,9 @@ class LiveAssistant:
                 # sin aviso. Medir el contexto nunca puede cortar la
                 # conversación.
                 # Instrumentación de rendimiento (Fase 0): cuánto contexto se
-                # manda en este turno. Apagada salvo MINDVOICE_PERF=1.
+                # manda en este turno. Apagada salvo MINDVOICE_PERF=1 o el
+                # panel de diagnóstico del HUD (Ctrl+Shift+D), que la enciende
+                # en caliente.
                 #
                 # Va en su propio try/except a propósito: si la métrica falla,
                 # la excepción caía en el `except` del turno, que descarta la

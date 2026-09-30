@@ -181,7 +181,7 @@ así que "borrar la clave" aquí no hace nada. Y la clave de serper vive **en cl
   generator is already running` — 9 veces en `overlay-launcher.log`.
 
 **P1**
-- `speech_vocabulary` **nunca persiste**: `overlay.py:1666` la escribe, pero no está en
+- `speech_vocabulary` **nunca persiste**: `overlay.py:1928` la escribe, pero no está en
   `prefs.DEFAULTS` (`prefs.py:27-48`) y `save_prefs` filtra por `k in DEFAULTS` (`:72`).
   Fix de una línea: añadir la clave a `DEFAULTS`.
 - Bytecode en el instalador: `Test-Package` (`:350`) regenera los `.pyc` **después** del
@@ -239,6 +239,44 @@ así que "borrar la clave" aquí no hace nada. Y la clave de serper vive **en cl
 6. Comentarios y prompts en **español**. Es la convención del repo.
 7. Antes de un refactor grande, `git log --oneline` y este fichero. Después, actualiza
    este fichero.
+
+## Instrumentación: `MINDVOICE_PERF` y el panel de diagnóstico (Fase 4)
+
+`perf_instr.py` mide el HUD y **no lo cambia nunca**. Se enciende de dos maneras:
+
+| Cómo | Cuándo |
+|---|---|
+| `MINDVOICE_PERF=1` (o `overlay`, `prompt`) | al arrancar; manda sobre todo lo demás |
+| `Ctrl+Shift+D` dentro del HUD | en caliente, sin relanzar la app |
+
+Cerrar el panel **no desactiva lo que arrancó el entorno**: `apagar()` solo devuelve el
+mando a `MINDVOICE_PERF`. Si la app se lanzó medida, sigue midiendo.
+
+Lo que enseña el panel (una línea por magnitud, todo leído de `Perf.snapshot()`):
+
+- `HUD n/s · ciclo … ms · volcado … ms` — cadencia y coste del `_poll` de 60 ms.
+- `tirones >100 ms / >500 ms` — tramos sin refrescar; es lo que el ojo ve como tirón.
+- `arranque: construida / visible … ms` — marcas de la Fase 0.
+- `prompt … car ~ … tok` — tamaño de lo inyectado al modelo por turno.
+- `motor: reinicios / muertes rápidas / PTT / voz` — salud del proceso, que antes no se
+  enseñaba en ningún sitio.
+
+**Al tocar este panel, tres invariantes que cuestan cero pero que rompen todo si fallan**
+(hay test para cada una, en `test_perf_overlay.py`):
+
+1. **Cerrado no cuesta nada.** Sin timer corriendo, sin hueco en el layout, sin
+   `PERF.enabled`. El timer se crea parado y solo `_toggle_perf` lo arranca. Y con el HUD
+   oculto (`Ctrl+Shift+Z`) el tick también se para, sin cerrar el panel: al volver a
+   mostrarlo sigue abierto. Un panel de diagnóstico que se nota es un panel que nadie
+   abre.
+2. **Nada de layout animado** y `setText` solo si el texto cambió: un `setText` con lo
+   mismo de contenido igual repinta el panel entero.
+3. **El atajo es un `QShortcut`**, no un `keyPressEvent`: al abrir el HUD el foco se va al
+   `QLineEdit` de órdenes y la ventana nunca ve la tecla.
+
+Tests: 30 en `test_perf_overlay.py` (contrato de `perf_instr` sin Qt, cableado del overlay
+leyendo el fuente, y el panel sobre un HUD real). Comprobado que **fallan** contra 18
+mutaciones del código, para que no sean decorativos.
 
 ## El grafo (graphify) — la memoria entre sesiones
 
@@ -371,8 +409,8 @@ nombres y las líneas sí son exactos.
 
 ## Estado del repo
 
-> Última revisión: 2026-09-30 — commit `9e50684` (fixes voz + búsqueda web), worktree con
-> la caché web movida al data dir y el CHANGELOG de 0.1.1.
+> Última revisión: 2026-09-30 — commit `42a5d93` (contador de animaciones) + Fase 4
+> (panel de diagnóstico del HUD, `Ctrl+Shift+D`). Suite: **259/259** en 10 ficheros.
 
 - Rama con 5 commits, `v0.1.0` tagueado. **`AGENTS.md` (este fichero) nunca se ha commiteado**
   — es memoria local. Si quieres que sobreviva a otra máquina, commitéalo.

@@ -55,9 +55,11 @@ from PyQt6.QtGui import (
     QColor,
     QGuiApplication,
     QIcon,
+    QKeySequence,
     QPainter,
     QPen,
     QPixmap,
+    QShortcut,
     QTextCursor,
 )
 from PyQt6.QtWidgets import (
@@ -105,6 +107,11 @@ from ui import tokens as TKN
 from ui.animations import Desvanecer, Fade
 
 logger = logging.getLogger(__name__)
+
+# Cada cuánto se refresca el panel de diagnóstico. Un segundo es suficiente
+# para leerlo y de paso no añade trabajo apreciable: con el panel cerrado el
+# timer ni siquiera corre.
+_PERF_TICK_MS = 1000
 
 
 def _chat_text(text: str) -> str:
@@ -535,6 +542,16 @@ class OverlayHud(QWidget):
         # Privacidad en sesión: oculta el contexto visual al modelo sin esperar
         # a Guardar (cambia screen_enabled en caliente).
         self._privacy_off = not bool(self._settings.screen_enabled)
+        # Panel de diagnóstico (Fase 4). Apagado por defecto y sin coste
+        # mientras lo está: sin timer corriendo y sin hueco en el layout. Los
+        # atributos se crean aquí, antes del singleton, para que el atajo y el
+        # tick no tengan que comprobar el caso de "otra instancia del HUD".
+        self._perf_visible = False
+        self._perf_texto = ""
+        self._perf_box: QFrame | None = None
+        self._perf_lbl: QLabel | None = None
+        self._perf_timer: QTimer | None = None
+        self._perf_shortcut: QShortcut | None = None
 
         self._single_ok = self._acquire_single_instance()
         if not self._single_ok:
@@ -762,6 +779,38 @@ class OverlayHud(QWidget):
         status_row.addWidget(self._power_btn)
 
         layout.addLayout(status_row)
+
+        # ---- Panel de diagnóstico (Fase 4) ----------------------------------
+        # Nace oculto. Con `setVisible(False)` el layout no le reserva hueco,
+        # así que el HUD de siempre se ve y se mide igual que antes de que
+        # esto existiera. Abrirlo enciende la instrumentación en caliente y
+        # arranca su timer; cerrarlo los para.
+        self._perf_box = QFrame()
+        self._perf_box.setObjectName("perf")
+        self._perf_box.setFrameShape(QFrame.Shape.NoFrame)
+        self._perf_box.setStyleSheet(
+            "QFrame#perf { background: rgba(255,255,255,18); border:1px solid"
+            " rgba(255,255,255,36); border-radius:"
+            + str(TKN.radio_bloque)
+            + "px; }"
+        )
+        perf_layout = QVBoxLayout(self._perf_box)
+        perf_layout.setContentsMargins(8, 6, 8, 6)
+        perf_layout.setSpacing(2)
+        self._perf_lbl = QLabel("")
+        self._perf_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        self._perf_lbl.setStyleSheet(
+            "color:" + TKN.cian + "; font:11px 'Consolas'; background:transparent;"
+        )
+        self._perf_lbl.setToolTip(
+            "Métricas del HUD, pedidas en caliente al abrir este panel.\n"
+            "Ctrl+Shift+D lo abre y lo cierra.\n"
+            "ciclos = vueltas del volcado a pantalla; tirones = tramos sin\n"
+            "refrescar (eso es lo que se ve como un tirón)."
+        )
+        perf_layout.addWidget(self._perf_lbl)
+        layout.addWidget(self._perf_box)
+        self._perf_box.setVisible(False)
 
         # ---- Chat real: QTextBrowser soporta HTML y abre enlaces externos
         # ---- (los resultados web se publican con URLs clicables).
@@ -1223,6 +1272,21 @@ class OverlayHud(QWidget):
         self._poll.timeout.connect(self._drain_ui_queue)
         self._poll.start()
 
+        # Tick del panel de diagnóstico. Se crea parado a propósito: lo
+        # arranca y lo para `_toggle_perf`, así que con el panel cerrado no
+        # hay ni un tick por segundo de overhead en el HUD.
+        self._perf_timer = QTimer(self)
+        self._perf_timer.setInterval(_PERF_TICK_MS)
+        self._perf_timer.timeout.connect(self._perf_tick)
+
+        # Atajo del panel. Es un QShortcut y no un keyPressEvent porque al
+        # abrir el HUD el foco se va al campo de órdenes, que se traga las
+        # teclas antes de que la ventana las vea. WindowShortcut lo recibe
+        # igual con el foco dentro del HUD.
+        self._perf_shortcut = QShortcut(QKeySequence("Ctrl+Shift+D"), self)
+        self._perf_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._perf_shortcut.activated.connect(self._toggle_perf)
+
         self._watchdog = QTimer(self)
         self._watchdog.setInterval(5000)
         self._watchdog.timeout.connect(self._watchdog_tick)
@@ -1666,6 +1730,63 @@ class OverlayHud(QWidget):
             outer.invalidate()
             outer.setGeometry(self.rect())
         self.chat.viewport().update()
+
+    # ------------------------------------------------------------------
+    # Panel de diagnóstico (Fase 4)
+    # ------------------------------------------------------------------
+    def _toggle_perf(self) -> None:
+        """Abre o cierra el panel de métricas (Ctrl+Shift+D).
+
+        Abrirlo enciende la instrumentación en caliente, que es lo que el
+        módulo ``perf_instr`` prometía y nadie usaba: las métricas solo se
+        recogían con ``MINDVOICE_PERF`` puesto antes de arrancar. Cerrarlo
+        devuelve el mando a la variable de entorno, así que si el proceso se
+        lanzó medido, sigue midiendo (y el panel no miente al decirlo).
+
+        Todo el coste de la función está en abrir. Cerrado, el panel no tiene
+        timer corriendo ni hueco en el layout.
+        """
+        if self._perf_box is None:
+            return  # instancia duplicada: este HUD no llegó a construir panel
+        self._perf_visible = not self._perf_visible
+        self._perf_box.setVisible(self._perf_visible)
+        if self._perf_visible:
+            _perf.encender()
+            if self._perf_timer is not None:
+                self._perf_timer.start()
+            self._perf_tick()
+        else:
+            if self._perf_timer is not None:
+                self._perf_timer.stop()
+            _perf.apagar()
+        # El panel crece o mengua, así que el size hint del panel cambia: sin
+        # esto el layout se queda con la medida anterior.
+        self._relayout_panel()
+        logger.info("Panel de diagnóstico %s", "abierto" if self._perf_visible else "cerrado")
+
+    def _perf_tick(self) -> None:
+        """Rellena el panel de métricas. Solo lo llama el timer ya abierto."""
+        if self._perf_lbl is None or not self._perf_visible:
+            return
+        lineas = list(_perf.resumen())
+        # Salud del proceso: contadores que el HUD llevaba sin enseñar en
+        # ningún sitio. Un reinicio del motor en pleno uso no se ve en el
+        # chat, y es justo lo que hay que ver cuando algo va raro.
+        lineas.append(
+            "motor: %d reinicio(s) · %d muerte(s) rápida(s) · PTT %d fallo(s) · %s"
+            % (
+                self._restarts,
+                self._quick_deaths,
+                self._ptt_failures,
+                "silenciado" if self._muted else "con voz",
+            )
+        )
+        texto = "\n".join(lineas)
+        # Solo se escribe si el texto cambió: un `setText` con lo mismo
+        # igual fuerza un repintado del panel entero cada segundo.
+        if texto != self._perf_texto:
+            self._perf_texto = texto
+            self._perf_lbl.setText(texto)
 
     def _sync_privacy_button(self) -> None:
         if self._privacy_off:
@@ -2291,6 +2412,12 @@ class OverlayHud(QWidget):
         self.activateWindow()
         self._relayout_panel()
         self._input_focus()
+        # Si el panel de diagnóstico estaba abierto, su reloj vuelve a correr
+        # con la ventana en pantalla. Con la ventana oculta no tiene sentido
+        # pedir un snapshot: el panel ya no se ve.
+        if self._perf_visible and self._perf_timer is not None:
+            self._perf_timer.start()
+        self._perf_tick()
         # Entra con un fundido corto en vez de aparecer de golpe.
         self._fundir_panel(entrando=True)
         # Visible de verdad: el panel ya está en pantalla. Esta es la marca que
@@ -2337,6 +2464,11 @@ class OverlayHud(QWidget):
         if self._cerrando:
             return
         self._cerrando = True
+        # El panel de diagnóstico deja de pedir snapshots mientras la ventana
+        # no se ve. El flag `_perf_visible` NO se toca: al volver a salir, el
+        # panel sigue abierto como estaba.
+        if self._perf_timer is not None:
+            self._perf_timer.stop()
         if not self.isVisible():
             # Nunca se mostró: no hay nada que fundir.
             self._cerrando = False
@@ -2404,6 +2536,10 @@ class OverlayHud(QWidget):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._watchdog_stop = True
         self._watchdog.stop()
+        # El panel de diagnóstico se para aquí: si no, su tick de un segundo
+        # sigue pidiendo un snapshot contra widgets que se están borrando.
+        if self._perf_timer is not None:
+            self._perf_timer.stop()
         # El fundido en curso se para aquí: si no, su ``finished`` dispara
         # ``_panel_oculto`` contra una ventana que ya se está cerrando.
         if self._anim_panel is not None:

@@ -1,0 +1,31 @@
+{
+  "fase": 4,
+  "medido_con": "Python 3.13, PyQt6 offscreen y HUD real construido con su panel. Sin red. 20 ciclos abrir/cerrar.",
+  "objetivo": "Que ver las métricas no cueste nada cuando el panel está cerrado, y que pedirlas en caliente funcione sin relanzar la app.",
+  "perf_instr": {
+    "encendido_en_caliente": true,
+    "encender_sin_MINDVOICE_PERF": true,
+    "apagar_no_pisa_entorno": true,
+    "solo_medidores_pedidos": true,
+    "resumen_legible_en_3_lineas": true
+  },
+  "overlay": {
+    "panel_nace_oculto": true,
+    "timer_nace_parado": true,
+    "atajo": "Ctrl+Shift+D (QShortcut, WindowShortcut)",
+    "ciclos_abrir_cerrar": 20,
+    "panel_no_reserva_hueco_cerrado": true,
+    "setText_solo_cuando_cambia": true,
+    "relayout_panel_al_cambiar_tamano": true,
+    "timer_parado_al_cerrar_ventana": true
+  },
+  "pruebas": {
+    "ficheros": 10,
+    "tests": 259,
+    "pasan": 259,
+    "fallan": 0,
+    "nuevo_test_perf_overlay": 30,
+    "mutaciones_detectadas": 18
+  },
+  "veredicto": "El coste visible cuando el panel está cerrado es 0: ni timer, ni hueco en el layout, ni instrumentación activada. Las métricas se ven sin relanzar la app y el ciclo abrir/cerrar no deriva el tamaño del panel."
+}

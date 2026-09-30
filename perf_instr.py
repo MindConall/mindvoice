@@ -4,8 +4,10 @@ Vive en su propio módulo para que `overlay.py` solo tenga que llamarlo, y todo
 queda apagado salvo que se active por variable de entorno o desde el HUD.
 
 Se activa con ``MINDVOICE_PERF=1`` (o ``MINDVOICE_PERF=overlay,prompt`` para
-elegir qué se mide). Escribir el informe: con ``MINDVOICE_PERF_OUT`` se indica un
-fichero JSON; si no, se deja en el directorio de datos de la app.
+elegir qué se mide), o en caliente desde el propio HUD con
+``PERF.encender()``, que es lo que hace el panel de diagnóstico (Ctrl+Shift+D).
+Escribir el informe: con ``MINDVOICE_PERF_OUT`` se indica un fichero JSON; si no,
+se deja en el directorio de datos de la app.
 
 Qué mide:
 
@@ -28,6 +30,7 @@ import os
 import threading
 import time
 from collections import deque
+from typing import Iterable
 
 # Muestreo de duración de los ciclos de volcado de la UI. Con 600 muestras se
 # cubre un minuto largo sin comer memoria.
@@ -36,9 +39,18 @@ _UI_SAMPLES = 600
 _PROMPT_WINDOW = 50
 
 # Una estimación de tokens: los providers usan ~4 caracteres por token. No es
-# exacta, pero sirve para compararSizes entre turnos y fases, que es lo que
+# exacta, pero sirve para comparar tamaños entre turnos y fases, que es lo que
 # buscamos. Para el número bueno hay que usar el contador del modelo.
 _CHARS_PER_TOKEN = 4.0
+
+# Medidores que se encienden a la vez. ``all`` los activa todos de una.
+_MEDIDORES = ("overlay", "prompt")
+
+# Selección de medidores impuesta desde la app (``PERF.encender()``). ``None``
+# significa "manda la variable de entorno"; un conjunto significa que el HUD
+# tiene el mando. Vive fuera de la instancia para que ``_wanted`` siga siendo
+# una función sin estado que no necesita conocer al singleton.
+_SELECCION: set[str] | None = None
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -49,13 +61,30 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 def _wanted(name: str) -> bool:
-    """``True`` si este medidor está habilitado en ``MINDVOICE_PERF``."""
+    """``True`` si este medidor está habilitado.
+
+    Manda ``MINDVOICE_PERF`` salvo que alguien haya llamado a ``encender()``:
+    así el panel de diagnóstico puede pedir las métricas sin que el usuario
+    tenga que reiniciar la app con variables de entorno.
+    """
+    if _SELECCION is not None:
+        return "all" in _SELECCION or name in _SELECCION
     sel = os.environ.get("MINDVOICE_PERF", "").strip().lower()
     if sel in ("", "0", "false", "no", "off"):
         return False
     if sel in ("1", "true", "yes", "on", "all"):
         return True
     return name in (s.strip() for s in sel.split(","))
+
+
+def _corto(n: float) -> str:
+    """Un número que quepa en un panel estrecho: 1234 se lee ``1.2k``."""
+    n = float(n)
+    if abs(n) >= 1000.0:
+        return "%.1fk" % (n / 1000.0)
+    if abs(n) >= 100.0:
+        return "%.0f" % n
+    return "%.1f" % n
 
 
 class Perf:
@@ -164,6 +193,36 @@ class Perf:
             self._log("prompt: %s" % self._last_prompt)
 
     # ------------------------------------------------------------------
+    # Encendido en caliente
+    # ------------------------------------------------------------------
+    def encender(self, medidores: Iterable[str] = _MEDIDORES) -> None:
+        """Pide las métricas desde la app, sin variable de entorno.
+
+        Es lo que cumple la promesa del módulo ("se activa ... o desde el
+        HUD"): el panel de diagnóstico lo llama al abrirse. Con el
+        arranque ya en marcha, lo único que cambia es que a partir de ahora
+        se anotan ciclos, volcados y tamaños de prompt; no se puede
+        "recuperar" lo anterior.
+        """
+        global _SELECCION
+        with self._lock:
+            self.enabled = True
+            _SELECCION = {str(m).strip().lower() for m in medidores} or {"all"}
+            self._log("instrumentación encendida en caliente: %s" % sorted(_SELECCION))
+
+    def apagar(self) -> None:
+        """Devuelve el mando a ``MINDVOICE_PERF``.
+
+        No apaga lo que pidió el arranque: si el proceso se lanzó con
+        ``MINDVOICE_PERF=1``, las métricas siguen porque el entorno manda
+        sobre el panel. Lo que sí se para es lo que el panel encendió.
+        """
+        global _SELECCION
+        with self._lock:
+            _SELECCION = None
+            self.enabled = _env_flag("MINDVOICE_PERF")
+
+    # ------------------------------------------------------------------
     # Informe
     # ------------------------------------------------------------------
     def snapshot(self) -> dict:
@@ -214,13 +273,90 @@ class Perf:
                 out["pantalla_chars_medio"] = round(sum(screens) / n, 1)
                 out["pantalla_chars_max"] = max(screens)
             if prompts or screens:
+                # El divisor es el número de TURNOS, no el de muestras: memoria
+                # y pantalla se guardan en dos colas y una por turno, así que
+                # sumar sus longitudes dividía por el doble y salía la mitad
+                # justo del tamaño del prompt, que es la cifra que de verdad
+                # importa para no reventar la ventana de contexto.
                 tot = sum(prompts) + sum(screens)
-                cnt = len(prompts) + len(screens)
-                out["prompt_total_chars_medio"] = round(tot / cnt, 1) if cnt else 0
-                out["prompt_tokens_aprox_medio"] = round(tot / cnt / _CHARS_PER_TOKEN, 1) if cnt else 0
+                turnos_prompt = max(len(prompts), len(screens))
+                out["prompt_total_chars_medio"] = (
+                    round(tot / turnos_prompt, 1) if turnos_prompt else 0
+                )
+                out["prompt_tokens_aprox_medio"] = (
+                    round(tot / turnos_prompt / _CHARS_PER_TOKEN, 1) if turnos_prompt else 0
+                )
             if self._last_prompt:
                 out["ultimo_turno"] = self._last_prompt
             return out
+
+    def resumen(self) -> list[str]:
+        """El informe de ``snapshot`` en tres líneas para un panel estrecho.
+
+        Se arma leyendo el ``snapshot`` y no los campos sueltos a propósito:
+        así el texto del HUD no puede enseñar una cifra que el JSON del
+        informe no tenga. Si un medidor está apagado o aún no tiene datos, su
+        línea no aparece en vez de enseñar ceros falsos.
+        """
+        d = self.snapshot()
+        lineas: list[str] = []
+
+        # 1) Fluidez: cada cuánto riega la UI y cuánto tarda cada riego.
+        if "ui_ciclos_por_segundo_real" in d:
+            linea = "HUD %.1f/s · ciclo %.1f ms (máx %.1f)" % (
+                d["ui_ciclos_por_segundo_real"],
+                d["ui_ciclo_medio_ms"],
+                d["ui_ciclo_max_ms"],
+            )
+        else:
+            linea = "HUD sin ciclos medidos"
+        if "ui_volcado_medio_ms" in d:
+            linea += " · volcado %.2f ms (máx %.2f)" % (
+                d["ui_volcado_medio_ms"],
+                d["ui_volcado_max_ms"],
+            )
+        lineas.append(linea)
+
+        # 2) Tirones y saturación: lo que el ojo nota como "se ha parado".
+        tirones = "tirones >100 ms %d · >500 ms %d" % (
+            d.get("ui_tramos_sobre_100ms", 0),
+            d.get("ui_tramos_sobre_500ms", 0),
+        )
+        lineas.append(
+            "%s · cola descartada %d · %d ciclos" % (
+                tirones,
+                d.get("ui_mensajes_descartados", 0),
+                d.get("ui_ciclos", 0),
+            )
+        )
+
+        # 3) Arranque y prompt: cuánto costó entrar y cuánto se le inyecta.
+        arranque = []
+        if "ui_construida_ms" in d:
+            arranque.append("construida %.0f ms" % d["ui_construida_ms"])
+        if "ui_visible_ms" in d:
+            arranque.append("visible %.0f ms" % d["ui_visible_ms"])
+        if arranque:
+            lineas.append("arranque: " + " · ".join(arranque))
+        if "prompt_turnos" in d:
+            turnos = d["prompt_turnos"]
+            lineas.append(
+                "prompt %s car (mem %s / pantalla %s) ~ %s tok · %d %s"
+                % (
+                    _corto(d.get("prompt_total_chars_medio", 0)),
+                    _corto(d.get("memoria_chars_medio", 0)),
+                    _corto(d.get("pantalla_chars_medio", 0)),
+                    _corto(d.get("prompt_tokens_aprox_medio", 0)),
+                    turnos,
+                    "turno" if turnos == 1 else "turnos",
+                )
+            )
+
+        if not d.get("habilitado"):
+            # El panel enseña el caso "arrancado sin instrumentación": sin
+            # esto, un HUD que se ve normal dejaría pensar que va a 0/s.
+            lineas.insert(0, "instrumentación apagada (MINDVOICE_PERF)")
+        return lineas
 
     def save(self, path: str | None = None) -> str:
         """Escribe el informe en JSON y devuelve la ruta usada."""
