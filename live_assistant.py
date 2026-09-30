@@ -66,6 +66,7 @@ from config import (
 )
 from hotkeys import HotkeyController
 from media import AudioPlayer, MicrophoneCapture, ScreenCapture
+from perf_instr import PERF as _perf
 from rutas import data_file, ensure_data_dir
 
 logger = logging.getLogger(__name__)
@@ -1121,6 +1122,15 @@ class LiveAssistant:
         self._permanent: list = self._load_permanent()
         self._memory_since_archive = 0
         self._archive_task: Optional[asyncio.Task] = None
+        # Índice de recuperación en grafo (Fase 1). Es ADEMÁS de la memoria
+        # plana, no la sustituye: ``self._memory`` sigue siendo la fuente de la
+        # verdad y los dos JSON siguen escribiéndose igual. Si el índice no
+        # existe (sin Graphify, o cualquier error al montarlo) todo lo de abajo
+        # cae al bloque plano de siempre.
+        self._memoria_indice = self._preparar_indice_memoria()
+        # Memoria de trabajo (Fase 2): qué turnos sirvieron y cuáles no. Vive
+        # junto al índice pero es independiente: si falla, el resto sigue.
+        self._memoria_trabajo = self._preparar_memoria_trabajo()
         # Búsqueda web: la consulta vigente pedida POR VOZ. La transcripción
         # llega con el turno de audio cerrado, así que la nota no cabe dentro
         # del turno (como sí con las órdenes de texto): se interrumpe la
@@ -1172,6 +1182,10 @@ class LiveAssistant:
         # servidor; se limpia al arrancar un turno nuevo (nueva orden, barge-in
         # o al terminar de evaluar el turno).
         self._turn_text = ""
+        # Pregunta del turno en curso (Fase 2). Es lo que ``_end_turn`` registra
+        # en la memoria de trabajo para poder aprender de cómo acabó. Sin esto,
+        # el registro de turnos se quedaba siempre vacío.
+        self._pregunta_turno: str = ""
         # Métricas de latencia por turno (E4): marca del inicio del turno y del
         # primer contenido de respuesta recibido. Se miden con ``time.monotonic``
         # y se reportan por log en ``_end_turn``.
@@ -1427,6 +1441,9 @@ class LiveAssistant:
             return
         self._memory.append({"role": role, "text": text})
         self._log_script(role, text)
+        # El índice de grafo es adicional: si falla, la memoria plana sigue
+        # avanzando igual.
+        self._indexar_recuerdo(text, role, "brief")
         evicted = []
         if len(self._memory) > _MEMORY_MAX:
             overflow = len(self._memory) - _MEMORY_MAX
@@ -1447,6 +1464,75 @@ class LiveAssistant:
                 # Sin margen para "sacrificar" contexto: solo se reanuda la
                 # cadencia del archivo periódico.
                 self._memory_since_archive = 0
+
+    # ------------------------------------------------------------------
+    # Índice de recuperación en grafo (Fase 1)
+    # ------------------------------------------------------------------
+    def _preparar_indice_memoria(self):
+        """Monta el índice de grafo y migra lo que ya hubiera.
+
+        Nunca lanza: si el grafo no está disponible se devuelve ``None`` y la
+        memoria sigue siendo la plana de siempre. Es la única vía por la que la
+        app puede quedarse sin índice sin romperse.
+        """
+        try:
+            from memory.migrate import get_backend, migrar
+
+            base = (self._settings.data_dir or "").strip()
+            if not base:
+                logger.info("Sin directorio de datos; la memoria va solo en plano.")
+                return None
+            indice = get_backend(base, _MEMORY_FILE, _PERMANENT_FILE)
+            if indice.nombre == "plano":
+                return None
+            migrar(indice, _MEMORY_FILE, _PERMANENT_FILE)
+            logger.info("Índice de memoria en grafo activo (%s).", indice.nombre)
+            return indice
+        except Exception as exc:  # noqa: BLE001 - la memoria nunca tumba la app
+            logger.warning("Sin índice de grafo para la memoria (%s); se usa el plano.", exc)
+            return None
+
+    def _preparar_memoria_trabajo(self):
+        """Monta el registro de turnos. Nunca lanza: es una capa opcional."""
+        try:
+            from memory.work_memory import MemoriaTrabajo
+
+            base = (self._settings.data_dir or "").strip()
+            if not base:
+                return None
+            return MemoriaTrabajo(os.path.join(base, "mindvoice-memory"))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Sin memoria de trabajo (%s); no afecta a la memoria.", exc)
+            return None
+
+    def registrar_giro(self, pregunta: str, resultado: str = "useful", correccion: str = "") -> None:
+        """Anota cómo acabó un turno para aprender de él.
+
+        Es la entrada de la reflexión de la Fase 2. Si no hay registro, el turno
+        se guarda igual en la memoria: esta llamada no puede perder nada.
+        """
+        registro = self._memoria_trabajo
+        if registro is None:
+            return
+        try:
+            registro.registrar(pregunta, resultado, correccion=correccion)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("No se pudo registrar el turno: %s", exc)
+
+    def _indexar_recuerdo(self, text: str, role: str, kind: str = "brief") -> None:
+        """Mete un recuerdo en el índice. Silencioso si no hay índice."""
+        indice = self._memoria_indice
+        if indice is None:
+            return
+        try:
+            indice.remember(
+                text,
+                role=role,
+                kind=kind,
+                importance=0.7 if kind == "permanent" else 0.5,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("No se pudo indexar el recuerdo: %s", exc)
 
     def _log_script(self, role: str, text: str) -> None:
         """Apéndice el guión de la conversación a un archivo en ``data_dir`` (E9).
@@ -1556,6 +1642,7 @@ class LiveAssistant:
         stored.append(summary[: _PERMANENT_MAX_CHARS])
         stored = stored[-_PERMANENT_MAX:]
         self._permanent = stored
+        self._indexar_recuerdo(summary[:_PERMANENT_MAX_CHARS], "system", "permanent")
         try:
             with open(_PERMANENT_FILE, "w", encoding="utf-8") as fh:
                 json.dump(stored, fh, ensure_ascii=False, indent=2)
@@ -1611,8 +1698,46 @@ class LiveAssistant:
         summary = (summary or "").strip().rstrip(".,;: ")
         return summary[:_PERMANENT_MAX_CHARS]
 
-    def _build_memory_block(self) -> str:
-        """Renderiza la memoria previa como nota para el system prompt."""
+    def _ampliar_bloque_memoria(self, bloque: str) -> str:
+        """Añade lecciones y preferencias al bloque ya construido.
+
+        Nunca quita nada: si esta capa falla, se queda el bloque de memoria tal
+        cual estaba, que es el comportamiento conocido.
+        """
+        registro = self._memoria_trabajo
+        if registro is None:
+            return bloque
+        try:
+            from memory.work_memory import nota_ampliada
+
+            entradas = list(self._memory) + list(self._permanent)
+            return nota_ampliada(
+                bloque,
+                registro=registro,
+                grafo=self._memoria_indice,
+                entradas=entradas,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("No se pudo ampliar el bloque de memoria: %s", exc)
+            return bloque
+
+    def _build_memory_block(self, query: str = "") -> str:
+        """Renderiza la memoria previa como nota para el system prompt.
+
+        Con índice de grafo se manda solo lo relevante a ``query``; sin índice,
+        el bloque es exactamente el de siempre (secciones larga plazo + breve y
+        presupuesto de ``_MEMORY_BUDGET``).
+        """
+        indice = self._memoria_indice
+        if indice is not None:
+            try:
+                bloque = indice.block(query, presupuesto=_MEMORY_BUDGET)
+                # Un índice recién vacío no puede dejar al modelo sin memoria.
+                if bloque.strip():
+                    return self._ampliar_bloque_memoria(bloque)
+            except Exception as exc:  # noqa: BLE001 - degradar al bloque plano
+                logger.warning("La recuperación por grafo falló (%s); se manda la memoria completa.", exc)
+
         sections = []
         long_lines = []
         for summary in self._permanent:
@@ -2148,6 +2273,8 @@ class LiveAssistant:
             # Nueva orden de usuario: la respuesta anterior ya no cuenta.
             self._turn_text = ""
             self._outdone_ts = None
+            # La pregunta del turno, para el registro de la Fase 2.
+            self._pregunta_turno = text
 
             # Marca de tiempo mínima: el modelo responde la hora con el dato
             # real en vez de inventarla.
@@ -2165,6 +2292,13 @@ class LiveAssistant:
                     self._archive_to_permanent(self._memory)
                 self._memory.clear()
                 self._save_memory()
+                # El índice también se limpia: si no, "olvida todo" dejaría los
+                # recuerdos recuperables desde el grafo.
+                if self._memoria_indice is not None:
+                    try:
+                        self._memoria_indice.reset()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("No se pudo limpiar el índice de memoria: %s", exc)
                 logger.info("Memoria breve borrada por la orden del usuario.")
             cmd = f"[{stamp}] {text}"
             if is_reset:
@@ -2178,6 +2312,20 @@ class LiveAssistant:
             # Integraciones locales (temporizador, volumen, portapapeles): se
             # ejecutan en la app; su nota reemplaza la búsqueda web del turno.
             local_note = self._local_action(text) if not is_reset else None
+            # `note` y `web_note` se rellenan más abajo, DENTRO de un `if`
+            # (solo si hay descripción de pantalla, y solo si hay búsqueda web).
+            # Se inicializan aquí a "" porque la instrumentación de la Fase 0 las
+            # mide al final del turno: sin esto, el primer turno sin visión
+            # lanzaba NameError y el `except` de abajo descartaba la orden
+            # entera, así que el usuario escribía y el asistente se callaba.
+            note = ""
+            web_note = ""
+            # `note` y `web_note` se rellenan más abajo, DENTRO de un `if`
+            # (solo si hay descripción de pantalla, y solo si hay búsqueda web).
+            # Se inicializan aquí a "" porque la instrumentación de la Fase 0 las
+            # mide al final del turno: sin esto, el primer turno sin visión
+            # lanzaba NameError y el `except` de abajo descartaba la orden
+            # entera, así que el usuario escribía y el asistente se callaba.
             # Nueva orden de usuario: se vuelven a permitir las rondas de
             # autocompletado (respuestas largas cortadas por el servidor).
             self._cont_remaining = _CONTINUE_MAX_ROUNDS
@@ -2285,6 +2433,29 @@ class LiveAssistant:
                 if local_note:
                     parts.append(types.Part(text=local_note))
                 parts.append(types.Part(text=cmd))
+                # Memoria relevante a ESTA orden (Fase 1). Al conectar la sesión
+                # ya se mandó un bloque de memoria, pero ese bloque se armó sin
+                # saber qué iba a preguntar el usuario: con el índice de grafo
+                # se puede traer solo lo que tiene que ver con la orden, que es
+                # lo único que hace que la recuperación por pregunta valga.
+                #
+                # Solo se añade si es MUCHO más corta que la memoria completa:
+                # manda menos contexto, pero sin repetir en cada turno lo que el
+                # modelo ya tiene en el system prompt.
+                try:
+                    bloque_turno = self._build_memory_block(text)
+                    if bloque_turno:
+                        completa = self._build_memory_block()
+                        if len(bloque_turno) <= len(completa) - 200:
+                            parts.insert(
+                                -1,
+                                types.Part(
+                                    text="(Recuerdos relacionados con esta "
+                                    f"pregunta): {bloque_turno}"
+                                ),
+                            )
+                except Exception as exc:  # noqa: BLE001 - es contexto, nunca crítico
+                    logger.debug("No se pudo añadir la memoria del turno: %s", exc)
                 query = explicit_query
                 if query is None and classify_fut is not None:
                     try:
@@ -2345,6 +2516,31 @@ class LiveAssistant:
                                 text=self._web_fallback_text(query)
                             ),
                         )
+                # Instrumentación de rendimiento (Fase 0): cuánto contexto se
+                # manda en este turno. Apagada salvo MINDVOICE_PERF=1.
+                #
+                # Va en su propio try/except a propósito: si la métrica falla,
+                # la excepción caía en el `except` del turno, que descarta la
+                # orden con un `continue` y el usuario se queda sin respuesta y
+                # sin aviso. Medir el contexto nunca puede cortar la
+                # conversación.
+                # Instrumentación de rendimiento (Fase 0): cuánto contexto se
+                # manda en este turno. Apagada salvo MINDVOICE_PERF=1.
+                #
+                # Va en su propio try/except a propósito: si la métrica falla,
+                # la excepción caía en el `except` del turno, que descarta la
+                # orden con un `continue` y el usuario se queda sin respuesta y
+                # sin aviso. Medir el contexto nunca puede cortar la
+                # conversación.
+                try:
+                    _perf.note_prompt(
+                        len(self._build_memory_block()),
+                        len(note or "") + len(web_note or "")
+                        + len(math_note or "") + len(local_note or ""),
+                        notes=int(bool(note)),
+                    )
+                except Exception as exc:  # noqa: BLE001 - es solo una métrica
+                    logger.debug("No se pudo medir el prompt del turno: %s", exc)
                 await session.send_client_content(
                     turns=[types.Content(role="user", parts=parts)],
                     turn_complete=True,
@@ -5325,6 +5521,8 @@ class LiveAssistant:
             logger.info("VOZ DEL USUARIO -> %s", text)
             self._safe_call(self.on_user_text, text)
             self._remember("user", text)
+            # La pregunta del turno, para el registro de la Fase 2.
+            self._pregunta_turno = text
             # Nuevo turno hablado: rondas de autocompletado disponibles de nuevo.
             self._cont_remaining = _CONTINUE_MAX_ROUNDS
             # Integración local POR VOZ (temporizador, volumen, portapapeles):
@@ -5405,6 +5603,26 @@ class LiveAssistant:
                 else AssistantState.IDLE
             )
             self._safe_call(self.on_turn_complete)
+            # Registro del turno (Fase 2): ya se sabe cómo acabó, así que es
+            # el momento de anotarlo para la reflexión. Un turno rechazado se
+            # marca como callejón sin salida (no es culpa de la respuesta) y se
+            # limpia la pregunta para no arrastrarla al turno siguiente.
+            pregunta_turno = (self._pregunta_turno or "").strip()
+            if pregunta_turno:
+                self.registrar_giro(
+                    pregunta_turno,
+                    "dead_end" if rejected else "useful",
+                )
+            self._pregunta_turno = ""
+            # Los contadores de refuerzo del grafo se aplazaron durante el turno
+            # (escribir a disco en cada recuperación costaba un cuarto de
+            # frame). Aquí, al terminar el turno, se vuelcan.
+            indice = self._memoria_indice
+            if indice is not None:
+                try:
+                    indice._vaciar_pendientes()
+                except Exception as exc:  # noqa: BLE001 - es contadores
+                    logger.debug("No se volcaron los contadores del grafo: %s", exc)
             self._outdone_ts = None
             if rejected:
                 self._safe_call(

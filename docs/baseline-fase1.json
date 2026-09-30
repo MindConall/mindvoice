@@ -1,0 +1,18 @@
+{
+  "fase": 1,
+  "medido_con": "LiveAssistant real, memoria de prueba de 6 recuerdos",
+  "bloque_sin_grafo_chars": 413,
+  "bloque_con_grafo_chars": 212,
+  "ahorro_pct": 48.7,
+  "pregunta_prueba": "¿cómo se llama mi perro?",
+  "trae_el_recuerdo_correcto": true,
+  "nodos": 29,
+  "aristas": 25,
+  "nodos_etiqueta": 21,
+  "memoria_real_del_usuario": {
+    "plano_chars": 4043,
+    "grafo_sin_pregunta_chars": 3179,
+    "grafo_media_5_preguntas_chars": 1800,
+    "ahorro_medio_pct": 55.4
+  }
+}

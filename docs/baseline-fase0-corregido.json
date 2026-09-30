@@ -1,0 +1,27 @@
+{
+  "fase": 0,
+  "nota": "Baseline CORREGIDO. El original midio con un bucle artificial de processEvents a ~60 Hz, no con el timer del overlay. Los valores de ciclos/s de abajo son los del timer real (setInterval(60) -> 16,7 Hz).",
+  "medicion_original_artefacto": {
+    "ui_ciclos_por_segundo_real": 95.97,
+    "ui_ciclo_medio_ms": 10.98,
+    "ui_ciclo_max_ms": 45.51,
+    "por_que": "bucle de prueba a 60 Hz, no el timer del overlay"
+  },
+  "medicion_con_timer_real": {
+    "ui_ciclo_max_ms": 67.57,
+    "ui_ciclo_medio_ms": 62.31,
+    "ui_ciclos": 64,
+    "ui_ciclos_por_segundo_real": 16.07,
+    "ui_ciclos_por_segundo_teorico": 16.0,
+    "ui_construida_ms": 212.2,
+    "ui_mensajes_descartados": 0,
+    "ui_tramos_sobre_100ms": 0,
+    "ui_tramos_sobre_500ms": 0,
+    "ui_ventana_segundos": 3.98,
+    "ui_visible_ms": 222.7,
+    "ui_volcado_max_ms": 0.157,
+    "ui_volcado_medio_ms": 0.045
+  },
+  "presupuesto_por_frame_ms": 16.67,
+  "nota_sobre_el_volcado": "ui_volcado_medio_ms es el trabajo real de drenar la cola; ui_ciclo_medio_ms es el intervalo entre drenados, no el coste. El coste real es 0.045 ms de media."
+}

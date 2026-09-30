@@ -1,0 +1,41 @@
+{
+  "fase": 3,
+  "plataforma": "offscreen (Windows 11, PyQt6)",
+  "presupuesto_frame_ms": 16.67,
+  "incumplimientos_reglas": 0,
+  "volcado_hud_real_ms": 0.02,
+  "volcado_con_animacion_ms": 0.051,
+  "coste_animar_por_frame_ms": 0.031,
+  "coste_animar_pct_frame": 0.2,
+  "diez_widgets_animando_ms": 0.003,
+  "tokens": {
+    "radios": [
+      8,
+      11,
+      12,
+      18
+    ],
+    "espacio": [
+      4,
+      8,
+      12,
+      16,
+      24,
+      32
+    ],
+    "tipografia": [
+      15,
+      13,
+      12,
+      10,
+      9
+    ],
+    "duraciones_ms": {
+      "toggle": 140,
+      "aparecer": 180,
+      "desvanecer": 160,
+      "pulso": 1200
+    }
+  },
+  "hallazgo": "windowOpacity no aplica a widgets hijos: Qt lo ignora en silencio (devuelve 1.0). Por eso FadeWidget usa efecto de opacidad."
+}

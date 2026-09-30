@@ -87,7 +87,12 @@ from config import (
 from hotkeys import HotkeyController
 from live_assistant import LiveAssistant
 from media import list_input_devices, list_output_devices
+from perf_instr import PERF as _perf
 from prefs import apply_prefs, load_prefs, save_prefs
+
+# Tokens de diseno (Fase 3/4): el QSS de este archivo toma color,
+# radio y tipografia de aqui, sin cambiar los valores que ya se veian.
+from ui import tokens as TKN
 
 logger = logging.getLogger(__name__)
 
@@ -321,39 +326,50 @@ def _mutex_exists(name: str) -> bool:
         return True
     return False
 
+# OJO con las llaves dobles: estos bloques son cadenas NORMALES, no f-strings,
+# así que `{{` sale tal cual en el QSS, que es como lo lleva leyendo Qt. Por eso
+# los tokens van por concatenación y no interpolados: si esto pasara a ser
+# f-string, habría que escribir `{{{{`, y es la clase de cambio que rompe el
+# QSS sin que se note. Solo se sustituyen valores que coinciden EXACTOS con un
+# token; un color parecido se deja como estaba.
 _BTN_QSS = (
-    "QPushButton {{ background: rgba(255,255,255,24); color:#e8ecf2;"
-    " border:1px solid rgba(255,255,255,64); border-radius:12px;"
-    " padding:5px 14px; font:12px 'Consolas'; }}"
+    "QPushButton {{ background: rgba(255,255,255,24); color:" + TKN.tinta + ";"
+    " border:1px solid rgba(255,255,255,64); border-radius:"
+    + f"{TKN.radio_tarjeta}px;"
+    " padding:5px 14px; font:" + f"{TKN.tamano_cuerpo}px" + " 'Consolas'; }}"
     "QPushButton:hover {{ background: rgba(255,255,255,42); }}"
 )
 _BTN_CANCEL_QSS = (
-    "QPushButton {{ background: rgba(255,90,90,40); color:#ffd7d7;"
-    " border:1px solid rgba(255,120,120,90); border-radius:12px;"
-    " padding:5px 14px; font:12px 'Consolas'; }}"
+    "QPushButton {{ background: rgba(255,90,90,40); color:" + TKN.rojo_tenue + ";"
+    " border:1px solid rgba(255,120,120,90); border-radius:"
+    + f"{TKN.radio_tarjeta}px;"
+    " padding:5px 14px; font:" + f"{TKN.tamano_cuerpo}px" + " 'Consolas'; }}"
     "QPushButton:hover {{ background: rgba(255,90,90,80); }}"
 )
 _BTN_POWER_QSS = (
     "QPushButton {{ background: rgba(255,45,45,90); color:#ffe1e1;"
-    " border:1px solid rgba(255,80,80,150); border-radius:12px;"
-    " padding:5px 14px; font:12px 'Consolas'; }}"
+    " border:1px solid rgba(255,80,80,150); border-radius:"
+    + f"{TKN.radio_tarjeta}px;"
+    " padding:5px 14px; font:" + f"{TKN.tamano_cuerpo}px" + " 'Consolas'; }}"
     "QPushButton:hover {{ background: rgba(255,60,60,140); }}"
 )
 # Botones de icono mínimo (38x38, solo glifo, esquinas suaves).
 _ICO_QSS = (
-    "QPushButton {{ background: rgba(255,255,255,22); color:#e8ecf2;"
-    " border:1px solid rgba(255,255,255,60); border-radius:11px; }}"
+    "QPushButton {{ background: rgba(255,255,255,22); color:" + TKN.tinta + ";"
+    " border:1px solid rgba(255,255,255,60); border-radius:"
+    + f"{TKN.radio_bloque}px; " + "}}"
     "QPushButton:hover {{ background: rgba(255,255,255,44); }}"
     "QPushButton:pressed {{ background: rgba(255,255,255,60); }}"
 )
 _ICO_RED_QSS = (
-    "QPushButton {{ background: rgba(255,90,90,42); color:#ffd7d7;"
-    " border:1px solid rgba(255,120,120,95); border-radius:11px; }}"
+    "QPushButton {{ background: rgba(255,90,90,42); color:" + TKN.rojo_tenue + ";"
+    " border:1px solid rgba(255,120,120,95); border-radius:"
+    + f"{TKN.radio_bloque}px; " + "}}"
     "QPushButton:hover {{ background: rgba(255,90,90,90); }}"
     "QPushButton:pressed {{ background: rgba(255,110,110,120); }}"
 )
 _CHIP_QSS = (
-    "QPushButton {{ background: rgba(255,255,255,16); color:#b9c8da;"
+    "QPushButton {{ background: rgba(255,255,255,16); color:" + TKN.tinta_borde + ";"
     " border:1px solid rgba(255,255,255,45); border-radius:9px;"
     " padding:3px 10px; font:11px 'Consolas'; }}"
     "QPushButton:hover {{ background: rgba(255,255,255,34); color:#eef2f7; }}"
@@ -542,6 +558,9 @@ class OverlayHud(QWidget):
         self._screen_geometry = screen.geometry()
         self.setGeometry(self._screen_geometry)
         self._build_panel()
+        # Marca de arranque (Fase 0): el árbol de widgets ya existe, así que a
+        # partir de aquí lo que se mide es cuánto tarda en verse en pantalla.
+        _perf.mark_ui_built()
         self._setup_hotkey()
         self._start_toggle_pipe()
         self._setup_ptt()
@@ -619,7 +638,7 @@ class OverlayHud(QWidget):
         title_col.addWidget(title)
         self._subtitle = QLabel("asistente en vivo · robot 8-bit")
         self._subtitle.setStyleSheet(
-            "color:#8fa3ba; font:11px 'Consolas'; letter-spacing:0.5px;"
+            f"color:{TKN.tinta_tenue}; font:11px 'Consolas'; letter-spacing:0.5px;"
         )
         title_col.addWidget(self._subtitle)
         header.addLayout(title_col)
@@ -631,38 +650,38 @@ class OverlayHud(QWidget):
         status_row.setSpacing(8)
         self._dot = QLabel(" ")
         self._dot.setFixedSize(12, 12)
-        self._dot.setStyleSheet("background:#59d98f;border-radius:6px;")
+        self._dot.setStyleSheet(f"background:{TKN.verde};border-radius:6px;")
         self._cap = QLabel("")
-        self._cap.setStyleSheet("color:#9fb2c9;font:11px 'Consolas';")
+        self._cap.setStyleSheet(f"color:{TKN.tinta_suave};font:11px 'Consolas';")
         self._relabel_cap()
         status_row.addWidget(self._dot)
         status_row.addWidget(self._cap)
 
         self._state_lbl = QLabel("")
-        self._state_lbl.setStyleSheet("color:#9fb2c9;font:11px 'Consolas';")
+        self._state_lbl.setStyleSheet(f"color:{TKN.tinta_suave};font:11px 'Consolas';")
         self._state_lbl.setToolTip("Estado del motor (colas, voces, sesión)")
         status_row.addWidget(self._state_lbl)
 
         self._timers_lbl = QLabel("")
-        self._timers_lbl.setStyleSheet("color:#f0c67a;font:11px 'Consolas';")
+        self._timers_lbl.setStyleSheet(f"color:{TKN.ambar};font:11px 'Consolas';")
         self._timers_lbl.setToolTip("Temporizadores pendientes")
         status_row.addWidget(self._timers_lbl)
 
         self._mute_lbl = QLabel("")
-        self._mute_lbl.setStyleSheet("color:#ffb340;font:11px 'Consolas';")
+        self._mute_lbl.setStyleSheet(f"color:{TKN.amarillo};font:11px 'Consolas';")
         self._mute_lbl.setToolTip("La salida de voz está silenciada")
         status_row.addWidget(self._mute_lbl)
 
         self._tokens_label = QLabel("tokens 0")
         self._tokens_label.setStyleSheet(
-            "color:#59d98f;font:11px 'Consolas';letter-spacing:0.5px;"
+            f"color:{TKN.verde};font:11px 'Consolas';letter-spacing:0.5px;"
         )
         self._tokens_label.setToolTip("Tokens consumidos (prompt + respuesta)")
         status_row.addWidget(self._tokens_label)
         status_row.addStretch(1)
 
         self._lvl = QLabel("")
-        self._lvl.setStyleSheet("color:#8fa3ba;font:11px 'Consolas';")
+        self._lvl.setStyleSheet(f"color:{TKN.tinta_tenue};font:11px 'Consolas';")
         status_row.addWidget(self._lvl)
 
         self._privacy_btn = QPushButton()
@@ -748,7 +767,7 @@ class OverlayHud(QWidget):
         self.chat.setMaximumHeight(chat_h)
         self.chat.setStyleSheet(
             "QTextBrowser#chat { background: transparent; border: none;"
-            " color: #e8ecf2; font: 13px 'Consolas'; }"
+            " color: " + TKN.tinta + "; font: 13px 'Consolas'; }"
         )
         layout.addWidget(self.chat)
 
@@ -791,7 +810,7 @@ class OverlayHud(QWidget):
 
         s_title = QLabel("AJUSTES")
         s_title.setStyleSheet(
-            "color:#9fb2c9; font:10px 'Consolas'; letter-spacing:2px;"
+            f"color:{TKN.tinta_suave}; font:10px 'Consolas'; letter-spacing:2px;"
         )
         s_layout.addWidget(s_title)
 
@@ -816,7 +835,7 @@ class OverlayHud(QWidget):
         vol_row = QHBoxLayout()
         vol_row.setSpacing(8)
         vol_lab = QLabel("VOLUMEN")
-        vol_lab.setStyleSheet("color:#9fb2c9;font:10px 'Consolas';letter-spacing:1px;")
+        vol_lab.setStyleSheet(f"color:{TKN.tinta_suave};font:10px 'Consolas';letter-spacing:1px;")
         vol_row.addWidget(vol_lab)
         self._vol_slider = QSlider(Qt.Orientation.Horizontal)
         self._vol_slider.setRange(0, 150)
@@ -827,11 +846,11 @@ class OverlayHud(QWidget):
             "QSlider::groove:horizontal { height:4px; background:"
             " rgba(255,255,255,40); border-radius:2px; }"
             "QSlider::handle:horizontal { width:14px; height:14px; margin:-5px 0;"
-            " background:#59d98f; border-radius:7px; }"
+            " background:" + TKN.verde + "; border-radius:7px; }"
         )
         vol_row.addWidget(self._vol_slider, 1)
         self._vol_label = QLabel(f"{self._vol_slider.value()}%")
-        self._vol_label.setStyleSheet("color:#e8ecf2;font:11px 'Consolas';")
+        self._vol_label.setStyleSheet(f"color:{TKN.tinta};font:11px 'Consolas';")
         self._vol_slider.valueChanged.connect(
             lambda v: self._vol_label.setText(f"{v}%")
         )
@@ -840,7 +859,7 @@ class OverlayHud(QWidget):
 
         self._cont_check = QCheckBox("Escucha continua (el micrófono queda activo al abrir la app)")
         self._cont_check.setStyleSheet(
-            "color:#c7d1de; font:11px 'Consolas';"
+            f"color:{TKN.tinta_media}; font:11px 'Consolas';"
             " QCheckBox::indicator { width:14px; height:14px; }"
         )
         self._cont_check.setChecked(bool(self._settings.overlay_voice_on_start))
@@ -851,7 +870,7 @@ class OverlayHud(QWidget):
 
         self._web_check = QCheckBox("Búsqueda web con stickies y /web")
         self._web_check.setStyleSheet(
-            "color:#c7d1de; font:11px 'Consolas';"
+            f"color:{TKN.tinta_media}; font:11px 'Consolas';"
             " QCheckBox::indicator { width:14px; height:14px; }"
         )
         self._web_check.setChecked(bool(self._settings.web_search_enabled))
@@ -859,7 +878,7 @@ class OverlayHud(QWidget):
 
         self._screen_check = QCheckBox("Ver pantalla (contexto visual al atender órdenes)")
         self._screen_check.setStyleSheet(
-            "color:#c7d1de; font:11px 'Consolas';"
+            f"color:{TKN.tinta_media}; font:11px 'Consolas';"
             " QCheckBox::indicator { width:14px; height:14px; }"
         )
         self._screen_check.setChecked(bool(self._settings.screen_enabled))
@@ -867,7 +886,7 @@ class OverlayHud(QWidget):
 
         self._transcript_check = QCheckBox("Guardar transcripción diaria en data_dir/sessions")
         self._transcript_check.setStyleSheet(
-            "color:#c7d1de; font:11px 'Consolas';"
+            f"color:{TKN.tinta_media}; font:11px 'Consolas';"
             " QCheckBox::indicator { width:14px; height:14px; }"
         )
         self._transcript_check.setChecked(bool(getattr(self._settings, "save_transcripts", True)))
@@ -877,7 +896,7 @@ class OverlayHud(QWidget):
             "Hablar sin límite: la IA contesta al soltar el botón"
         )
         self._manual_vad_check.setStyleSheet(
-            "color:#c7d1de; font:11px 'Consolas';"
+            f"color:{TKN.tinta_media}; font:11px 'Consolas';"
             " QCheckBox::indicator { width:14px; height:14px; }"
         )
         self._manual_vad_check.setToolTip(
@@ -899,7 +918,7 @@ class OverlayHud(QWidget):
         op_row = QHBoxLayout()
         op_row.setSpacing(8)
         op_lab = QLabel("OPACIDAD")
-        op_lab.setStyleSheet("color:#9fb2c9;font:10px 'Consolas';letter-spacing:1px;")
+        op_lab.setStyleSheet(f"color:{TKN.tinta_suave};font:10px 'Consolas';letter-spacing:1px;")
         op_row.addWidget(op_lab)
         self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self._opacity_slider.setRange(30, 95)
@@ -910,11 +929,11 @@ class OverlayHud(QWidget):
             "QSlider::groove:horizontal { height:4px; background:"
             " rgba(255,255,255,40); border-radius:2px; }"
             "QSlider::handle:horizontal { width:14px; height:14px; margin:-5px 0;"
-            " background:#59d98f; border-radius:7px; }"
+            " background:" + TKN.verde + "; border-radius:7px; }"
         )
         op_row.addWidget(self._opacity_slider, 1)
         self._opacity_val = QLabel(f"{self._opacity_slider.value()}%")
-        self._opacity_val.setStyleSheet("color:#e8ecf2;font:11px 'Consolas';")
+        self._opacity_val.setStyleSheet(f"color:{TKN.tinta};font:11px 'Consolas';")
         self._opacity_slider.valueChanged.connect(
             lambda v: self._opacity_val.setText(f"{v}%")
         )
@@ -959,7 +978,7 @@ class OverlayHud(QWidget):
         self._api_key_edit.setStyleSheet(
             "QLineEdit { background: rgba(255,255,255,24); border:1px solid"
             " rgba(255,255,255,50); border-radius:8px; padding:4px 8px;"
-            " color:#e8ecf2; font:11px 'Consolas'; }"
+            " color:" + TKN.tinta + "; font:11px 'Consolas'; }"
         )
         s_layout.addWidget(self._api_key_edit)
         self._web_provider_combo.currentIndexChanged.connect(
@@ -969,7 +988,7 @@ class OverlayHud(QWidget):
 
         self._smart_check = QCheckBox("Detección inteligente: busca aunque no digas \"/web\"")
         self._smart_check.setStyleSheet(
-            "color:#c7d1de; font:11px 'Consolas';"
+            f"color:{TKN.tinta_media}; font:11px 'Consolas';"
             " QCheckBox::indicator { width:14px; height:14px; }"
         )
         self._smart_check.setChecked(bool(self._settings.web_smart_detect))
@@ -985,7 +1004,7 @@ class OverlayHud(QWidget):
         keys_row = QHBoxLayout()
         keys_row.setSpacing(8)
         keys_lab = QLabel("TECLAS")
-        keys_lab.setStyleSheet("color:#9fb2c9;font:10px 'Consolas';letter-spacing:1px;")
+        keys_lab.setStyleSheet(f"color:{TKN.tinta_suave};font:10px 'Consolas';letter-spacing:1px;")
         keys_row.addWidget(keys_lab)
         keys_col = QVBoxLayout()
         keys_col.setSpacing(4)
@@ -994,7 +1013,7 @@ class OverlayHud(QWidget):
         self._ptt_edit.setStyleSheet(
             "QLineEdit { background: rgba(255,255,255,24); border:1px solid"
             " rgba(255,255,255,50); border-radius:8px; padding:4px 8px;"
-            " color:#e8ecf2; font:11px 'Consolas'; }"
+            " color:" + TKN.tinta + "; font:11px 'Consolas'; }"
         )
         keys_col.addWidget(self._ptt_edit)
         self._hotkey_edit = QLineEdit(str(self._settings.overlay_hotkey or "Ctrl+Shift+Z"))
@@ -1002,7 +1021,7 @@ class OverlayHud(QWidget):
         self._hotkey_edit.setStyleSheet(
             "QLineEdit { background: rgba(255,255,255,24); border:1px solid"
             " rgba(255,255,255,50); border-radius:8px; padding:4px 8px;"
-            " color:#e8ecf2; font:11px 'Consolas'; }"
+            " color:" + TKN.tinta + "; font:11px 'Consolas'; }"
         )
         keys_col.addWidget(self._hotkey_edit)
         keys_row.addLayout(keys_col, 1)
@@ -1025,7 +1044,7 @@ class OverlayHud(QWidget):
         self._vocab_edit.setStyleSheet(
             "QLineEdit { background: rgba(255,255,255,24); border:1px solid"
             " rgba(255,255,255,50); border-radius:8px; padding:4px 8px;"
-            " color:#e8ecf2; font:11px 'Consolas'; }"
+            " color:" + TKN.tinta + "; font:11px 'Consolas'; }"
         )
         s_layout.addWidget(self._vocab_edit)
 
@@ -1093,7 +1112,7 @@ class OverlayHud(QWidget):
         self.input.setStyleSheet(
             "QLineEdit { background: rgba(255,255,255,34); border: 1px solid"
             " rgba(255,255,255,60); border-radius: 10px; padding: 8px 12px;"
-            " color: #f4f7fb; font: 14px 'Consolas'; }"
+            " color: " + TKN.tinta_alta + "; font: 14px 'Consolas'; }"
             "QLineEdit:focus { border-color: rgba(255,255,255,130); }"
         )
         self.input.returnPressed.connect(self._on_submit)
@@ -1133,14 +1152,14 @@ class OverlayHud(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         lab = QLabel(label)
-        lab.setStyleSheet("color:#9fb2c9;font:10px 'Consolas';letter-spacing:1px;")
+        lab.setStyleSheet(f"color:{TKN.tinta_suave};font:10px 'Consolas';letter-spacing:1px;")
         row.addWidget(lab, 0)
         combo.setStyleSheet(
-            "QComboBox { background: rgba(255,255,255,24); color:#e8ecf2;"
+            "QComboBox { background: rgba(255,255,255,24); color:" + TKN.tinta + ";"
             " border:1px solid rgba(255,255,255,50); border-radius:8px;"
             " padding:4px 8px; font:11px 'Consolas'; }"
             "QComboBox:hover { border-color: rgba(255,255,255,110); }"
-            "QComboBox QAbstractItemView { background:#151a24; color:#e8ecf2;"
+            "QComboBox QAbstractItemView { background:" + TKN.fondo + "; color:" + TKN.tinta + ";"
             " border:1px solid rgba(255,255,255,40); selection-background-color:#2a3547; }"
         )
         row.addWidget(combo, 1)
@@ -1234,19 +1253,19 @@ class OverlayHud(QWidget):
     def _blink_tick(self) -> None:
         style = self._dot.styleSheet()
         self._dot.setStyleSheet(
-            "background:#ffb340;border-radius:6px;"
+            f"background:{TKN.amarillo};border-radius:6px;"
             if "ffb340" in style else "background:#7a5a20;border-radius:6px;"
         )
 
     def _set_processing(self, on: bool) -> None:
         self._processing = on
         if on:
-            self._set_status("#ffb340", "MindVoice — procesando…")
+            self._set_status(f"{TKN.amarillo}", "MindVoice — procesando…")
             self._blink.start()
         else:
             self._blink.stop()
             caption = "MindVoice — listo · voz activa" if self._continuous_voice else "MindVoice — listo"
-            self._set_status("#59d98f", caption)
+            self._set_status(f"{TKN.verde}", caption)
 
     def add_history(self, tag: str, text: str) -> None:
         if (
@@ -1255,11 +1274,11 @@ class OverlayHud(QWidget):
         ):
             self._transcript_executor.submit(self._log_transcript, tag, text or "")
         label = {
-            "Tú": "#7ee0ff",
+            "Tú": f"{TKN.cian}",
             "IA": "#aee9ae",
-            "Web": "#f0c67a",
-            "Sys": "#9fb2c9",
-        }.get(tag, "#9fb2c9")
+            "Web": f"{TKN.ambar}",
+            "Sys": f"{TKN.tinta_suave}",
+        }.get(tag, f"{TKN.tinta_suave}")
         if tag == "Web":
             body = _web_html(text)
         elif tag in ("IA",):
@@ -1309,7 +1328,7 @@ class OverlayHud(QWidget):
             " border:1px solid rgba(89,217,143,180); border-radius:12px;"
             " padding:5px 14px; font:12px 'Consolas'; }"
         )
-        self._set_status("#ffb340", "Hablando…  (suelta el botón para responder)")
+        self._set_status(f"{TKN.amarillo}", "Hablando…  (suelta el botón para responder)")
         self._blink.start()
         self._set_engine_voice(True)
 
@@ -1322,7 +1341,7 @@ class OverlayHud(QWidget):
         self._lvl.setText(f"{db:.0f} dB")
         strong = rms >= 40.0
         self._lvl.setStyleSheet(
-            ("color:#7fd3a5;" if strong else "color:#8fa3ba;") + "font:11px 'Consolas';"
+            ("color:#7fd3a5;" if strong else f"color:{TKN.tinta_tenue};") + "font:11px 'Consolas';"
         )
 
     def _set_tokens(self, payload: str) -> None:
@@ -2080,6 +2099,9 @@ class OverlayHud(QWidget):
         self.activateWindow()
         self._relayout_panel()
         self._input_focus()
+        # Visible de verdad: el panel ya está en pantalla. Esta es la marca que
+        # cierra la ventana de arranque.
+        _perf.mark_ui_visible()
 
     def _prefetch_screen_context(self) -> None:
         """Avisa al motor de que va a hacer falta ver la pantalla.
@@ -2333,12 +2355,22 @@ class OverlayHud(QWidget):
             "quit",
         }:
             logger.debug("Cola de UI saturada, soltando mensaje (%s)", kind)
+            _perf.note_drop()
             return
         self._ui_queue.put((kind, payload))
         if kind == "lvl":
             self._lvl_pending = True
 
     def _drain_ui_queue(self) -> None:
+        # Marca de Fase 0: un ciclo de volcado de la cola. Con esto se mide lo
+        # que tarda el HUD en atender un mensaje, no la velocidad del reloj.
+        _perf.ui_cycle_start()
+        try:
+            self._drain_ui_queue_cuerpo()
+        finally:
+            _perf.ui_cycle_end()
+
+    def _drain_ui_queue_cuerpo(self) -> None:
         deadline = time.monotonic() + 0.05
         for _ in range(200):
             if time.monotonic() >= deadline:
@@ -2410,15 +2442,15 @@ class OverlayHud(QWidget):
             "IDLE": "en reposo",
         }.get(state, state and state.lower() or "")
         colors = {
-            "escuchando": "#7ee0ff",
-            "procesando": "#ffb340",
-            "hablando": "#59d98f",
+            "escuchando": f"{TKN.cian}",
+            "procesando": f"{TKN.amarillo}",
+            "hablando": f"{TKN.verde}",
             "reconectando": "#ff5d5d",
-            "en reposo": "#8fa3ba",
+            "en reposo": f"{TKN.tinta_tenue}",
         }
         self._state_lbl.setText(f"· {label}" if label else "")
         self._state_lbl.setStyleSheet(
-            f"color:{colors.get(label, '#9fb2c9')};font:11px 'Consolas';"
+            f"color:{colors.get(label, TKN.tinta_suave)};font:11px 'Consolas';"
         )
 
     def _on_submit(self) -> None:
