@@ -49,3 +49,13 @@ desktop.ini
 # Volcado monolítico del código usado como copia de seguridad local.
 # Es un duplicado de todos los módulos: publicarlo confunde y desincroniza.
 mindvoice_codigo_completo.py
+
+# Salidas de compilación de los scripts de tools/.
+tools/__pycache__/
+
+# Artefactos del grafo. `graphify-out/` pesa 2 MB y casi todo son HTML que se
+# regeneran con `graphify update .`. La excepción es graph.json, que sí se
+# versiona porque es lo que usa el merge driver declarado en .gitattributes para
+# resolver conflictos de grafo.
+graphify-out/*
+!graphify-out/graph.json
