@@ -222,7 +222,7 @@ function Assert-NoSecrets {
 
     # Segunda pasada: el patrón de una clave de Gemini en cualquier .py.
     $sospechosos = Get-ChildItem -Path $AppOut -Recurse -File -Include '*.py', '*.json', '*.md' -EA SilentlyContinue |
-        Select-String -Pattern 'AIza[0-9A-Za-z_-]{35}' -EA SilentlyContinue
+        Select-String -Pattern 'AIza[0-9A-Za-z_-]{35}','(?i)serper[_-]?api[_-]?key["'']?\s*[:=]\s*["'']?[0-9a-f]{32,}' -EA SilentlyContinue
     if ($sospechosos) {
         $sospechosos | Select-Object -First 5 | ForEach-Object {
             Write-Host "    ¡CLAVE EN CLARO! $($_.Filename):$($_.LineNumber)" -ForegroundColor Red
@@ -236,7 +236,7 @@ function Assert-NoSecrets {
 function Get-AppVersion {
     $file = Join-Path $Root 'installer\version.txt'
     if (Test-Path $file) { return (Get-Content $file -Raw).Trim() }
-    return '0.1.0'
+    throw "Falta installer\version.txt: la versión no se puede adivinar."
 }
 
 function Invoke-InnoSetup {

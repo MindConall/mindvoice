@@ -8,6 +8,7 @@ disponibilidad de una clave concreta, que el motor de búsqueda se elige según
 la clave que hay, y que el arranque dice con qué configuración se arranca.
 """
 
+import importlib
 import os
 import re
 import sys
@@ -172,6 +173,59 @@ class TestClonLimpio(unittest.TestCase):
         union = "\n".join(avisos)
         self.assertNotIn(secreto, union)
         self.assertIn("Clave de API: presente", union)
+
+    # -- persistencia entre reinicios ---------------------------------------
+    @staticmethod
+    def _app_dir() -> str:
+        """Carpeta del código, en minúsculas para comparar sin sorpresas."""
+        return str(importlib.import_module("rutas").app_dir()).lower()
+
+    def test_el_estado_mutable_no_vive_junto_al_codigo(self) -> None:
+        """Nada de lo que la app escribe puede estar en la carpeta de la app.
+
+        Instalada en ``C:\\Program Files`` esa carpeta no se puede escribir: los
+        ``open(..., "w")`` darían PermissionError y, como todo va envuelto en
+        ``try/except``, el fallo se perdería en silencio. Lo que se guarda tiene
+        que ir al directorio de datos del usuario.
+        """
+        app_dir = self._app_dir()
+        persistentes = [prefs_mod.PREFS_FILE, la._WEB_MODEL_CACHE_FILE]
+        dentro_de_app = [
+            str(ruta) for ruta in persistentes
+            if str(ruta).lower().startswith(app_dir)
+        ]
+        self.assertEqual(
+            [],
+            dentro_de_app,
+            "estado mutable escrito junto al código: no persistirá en un install",
+        )
+
+    def test_la_cache_web_sobrevive_a_un_data_dir_nuevo(self) -> None:
+        """Guardar y releer la caché crea el directorio si aún no existe."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporal:
+            destino = Path(temporal) / "MindVoice" / "web_model_cache.json"
+            with mock.patch.object(la, "_WEB_MODEL_CACHE_FILE", destino), \
+                 mock.patch.object(
+                     la, "ensure_data_dir",
+                     lambda: destino.parent.mkdir(parents=True, exist_ok=True) or destino.parent,
+                 ):
+                la._save_cached_web_model("gemini-3.6-flash")
+                self.assertTrue(destino.exists(), "no se pudo guardar la caché")
+                self.assertEqual("gemini-3.6-flash", la._load_cached_web_model())
+
+    def test_un_json_corrupto_no_impide_arrancar(self) -> None:
+        """Preferencias inservibles: se avisa y se sigue con los valores por defecto."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporal:
+            roto = Path(temporal) / "user_prefs.json"
+            roto.write_text("{esto no es json,,,[", encoding="utf-8")
+            with mock.patch.object(prefs_mod, "PREFS_FILE", roto):
+                prefs = prefs_mod.load_prefs()
+        self.assertEqual(prefs_mod.DEFAULTS["voice"], prefs["voice"])
+        self.assertIn("web_search_provider", prefs)
 
     # -- higiene del clon ---------------------------------------------------
     def test_no_hay_rutas_absolutas_a_una_maquina(self) -> None:

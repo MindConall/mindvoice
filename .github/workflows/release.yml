@@ -42,8 +42,10 @@ jobs:
           $declared = (Get-Content installer/version.txt -Raw).Trim()
           $tagged    = '${{ steps.version.outputs.version }}'
           if ($declared -ne $tagged) {
-            Write-Host "ATENCION: installer/version.txt dice '$declared' pero el tag es '$tagged'."
-            Write-Host "Se publica con la del tag. Actualiza version.txt para que no se avisen."
+            Write-Host "ERROR: installer/version.txt dice '$declared' pero el tag es '$tagged'."
+            Write-Host "Publicar asi deja el .exe con una version distinta de la del tag."
+            Write-Host "Arregla version.txt para que coincidan y vuelve a lanzar."
+            exit 1
           } else {
             Write-Host "Coinciden: $declared"
           }

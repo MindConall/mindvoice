@@ -66,7 +66,7 @@ from config import (
 )
 from hotkeys import HotkeyController
 from media import AudioPlayer, MicrophoneCapture, ScreenCapture
-from rutas import data_file
+from rutas import data_file, ensure_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -657,11 +657,15 @@ _WEB_MODEL_RESOLVE_DEADLINE = 12.0
 _WEB_MODEL_MAX_PROBES = 6
 # Caché EN DISCO del modelo resuelto. Antes solo vivía en memoria, y como el
 # watchdog recrea el LiveAssistant en cada reinicio (el 25/09 fueron ~170), la
-# resolución se repetía constantemente. Un archivo junto al código (igual que
-# ``user_prefs.json``) la resuelve una sola vez por semana.
-_WEB_MODEL_CACHE_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "web_model_cache.json"
-)
+# resolución se repetía constantemente. Un archivo en disco la resuelve una sola
+# vez por semana.
+#
+# Va en el directorio de datos del usuario (``rutas.data_file``) y NO junto al
+# código: instalada en "C:\Program Files" la carpeta de la app no se puede
+# escribir, el guardado fallaría con PermissionError y el ``except`` de abajo se
+# lo tragaría en silencio, así que cada arranque repetiría la resolución completa.
+# Es el mismo motivo por el que ``user_prefs.json`` vive fuera del código.
+_WEB_MODEL_CACHE_FILE = data_file("web_model_cache.json")
 _WEB_MODEL_CACHE_TTL = 7 * 24 * 3600.0
 
 # Proveedores externos de resultados web (cuando el grounding de Google Search
@@ -979,6 +983,7 @@ def _save_cached_web_model(name: str) -> None:
     if not name:
         return
     try:
+        ensure_data_dir()
         temp = f"{_WEB_MODEL_CACHE_FILE}.tmp"
         with open(temp, "w", encoding="utf-8") as handle:
             json.dump({"model": name, "ts": time.time()}, handle)

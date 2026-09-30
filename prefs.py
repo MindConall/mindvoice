@@ -42,6 +42,10 @@ DEFAULTS: Dict[str, Any] = {
     # limpio aunque tuviera clave de serper puesta.
     "web_search_provider": None,
     "serper_api_key": "",
+    # Sin esta clave, ``save_prefs`` filtra el vocabulario al guardar (solo deja
+    # pasar lo que está en DEFAULTS) y ``apply_prefs`` lo lee de las
+    # preferencias, así que se perdía al cerrar la app.
+    "speech_vocabulary": "",
     "web_smart_detect": True,
     "mute_mode": "toggle",
     "ptt_key": "right ctrl",
