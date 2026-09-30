@@ -82,8 +82,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.version }}
         run: |
-          $notas = @"
-          ## MindVoice $env:TAG
+          # El CHANGELOG manda en lo que se publica. Antes las notas eran una
+          # plantilla fija con solo instrucciones de instalacion, asi que una
+          # release podia salir sin decir que arreglaba (pasó en la 0.1.1).
+          #
+          # Se copia a una variable con += en vez de meterlo en el here-string
+          # de abajo: dentro de un @" "@ los acentos graves son escapes, y el
+          # CHANGELOG usa backticks de markdown a montones.
+          $cambios = '_(Este tag no trae CHANGELOG.md o no se pudo leer.)_'
+          if (Test-Path CHANGELOG.md) {
+              $cambios = (Get-Content CHANGELOG.md -Raw).Trim()
+          }
+
+          $instalacion = @"
+          ## Cómo instalarlo
 
           Instalador de Windows x64.
 
@@ -103,10 +115,15 @@ jobs:
           Página del proyecto: https://github.com/${{ github.repository }}
           "@
 
+          # El fichero evita que el shell se coma los saltos de linea y los
+          # caracteres especiales del markdown.
+          $notas = $cambios + "`n`n---`n`n" + $instalacion
+          Set-Content -Path notas.md -Value $notas -Encoding utf8
+
           gh release create "v$env:TAG" `
             installer/output/*.exe `
             --title "MindVoice $env:TAG" `
-            --notes $notas `
+            --notes-file notas.md `
             --verify-tag
 
       - name: Subir el artefacto sin publicar Release

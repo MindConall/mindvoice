@@ -4,6 +4,10 @@ Todas las novedades de MindVoice están aquí. El formato sigue
 [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y las versiones
 siguen [SemVer](https://semver.org/lang/es/).
 
+Este fichero es la fuente de las notas de cada release: el workflow de
+publicación lo lee y lo antepone a las instrucciones de instalación, así que
+**lo que no esté aquí, la release no lo dirá**.
+
 ## [No publicado]
 
 ## [0.1.1] - 2026-09-30
