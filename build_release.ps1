@@ -141,8 +141,15 @@ function Install-Requirements {
 $AppSourceFiles = @(
     'MindVoice.py', 'main.py', 'overlay.py', 'launcher.py',
     'start_mindvoice.py', 'live_assistant.py', 'config.py', 'prefs.py',
-    'credenciales.py', 'firstrun.py', 'hotkeys.py', 'branding.py', 'rutas.py'
+    'credenciales.py', 'firstrun.py', 'hotkeys.py', 'branding.py', 'rutas.py',
+    # Fases 0-5: la instrumentación, el sistema de diseño/animaciones/acento y
+    # la memoria viven en módulos y paquetes aparte. Si se olvidan aquí, el
+    # paquete compila pero la app instalada muere con "No module named 'ui'".
+    'perf_instr.py'
 )
+
+# Paquetes propios que hay que copiar ENTEROS y conservando su carpeta.
+$AppPackages = @('media', 'ui', 'memory')
 
 function Copy-AppSource {
     Write-Step "Copiando el código de la app"
@@ -158,13 +165,22 @@ function Copy-AppSource {
         Copy-Item $source -Destination (Join-Path $AppOut $name)
     }
 
-    # 'media' es un paquete, no un módulo suelto: sus archivos tienen que ir
-    # dentro de media\, no aplanados en la raíz. Si se copian en la raíz,
-    # Python encuentra la carpeta vacía como paquete de espacio de nombres y
-    # falla con "cannot import name 'AudioPlayer' from 'media'".
-    $mediaOut = Join-Path $AppOut 'media'
-    Get-ChildItem -Path (Join-Path $Root 'media') -Filter '*.py' | ForEach-Object {
-        Copy-Item $_.FullName -Destination $mediaOut
+    # Los paquetes propios ('media', 'ui', 'memory') NO son módulos sueltos: sus
+    # archivos tienen que ir dentro de su carpeta, no aplanados en la raíz. Si
+    # se copian en la raíz, Python encuentra la carpeta vacía como paquete de
+    # espacio de nombres y falla ("cannot import name 'AudioPlayer' from
+    # 'media'", "No module named 'ui'").
+    foreach ($pkg in $AppPackages) {
+        $pkgSource = Join-Path $Root $pkg
+        if (-not (Test-Path $pkgSource)) { throw "Falta el paquete $pkg" }
+        $pkgOut = Join-Path $AppOut $pkg
+        New-Item -ItemType Directory -Force -Path $pkgOut | Out-Null
+        Get-ChildItem -Path $pkgSource -Recurse -File -Filter '*.py' | ForEach-Object {
+            $rel = $_.FullName.Substring($pkgSource.Length).TrimStart('\')
+            $dest = Join-Path $pkgOut $rel
+            New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+            Copy-Item $_.FullName -Destination $dest
+        }
     }
 
     # Ojo: -Include solo filtra bien si la ruta termina en \* o si se usa
@@ -298,7 +314,10 @@ sys.path.insert(0, APP)
 # Reproduce el arranque real: pythonw.exe <app>\MindVoice.py
 import MindVoice, start_mindvoice, launcher, overlay, live_assistant
 import config, prefs, credenciales, firstrun, rutas, hotkeys, branding
+import perf_instr
 from media import AudioPlayer, MicrophoneCapture, ScreenCapture
+from ui import tokens, animations, accento
+from memory import base, flat_backend, graph_backend, migrate, work_memory
 import google.genai, mss, pyaudio, keyboard
 from PyQt6 import QtWidgets
 

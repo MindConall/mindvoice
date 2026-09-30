@@ -278,6 +278,54 @@ Tests: 30 en `test_perf_overlay.py` (contrato de `perf_instr` sin Qt, cableado d
 leyendo el fuente, y el panel sobre un HUD real). Comprobado que **fallan** contra 18
 mutaciones del código, para que no sean decorativos.
 
+## La capa de acento: QML, y por qué no shader (Fase 5)
+
+El brillo del panel se decidió **midiendo**, no por gusto. Prototipo al tamaño real del
+HUD (416×390, Radeon RX 580, GL 4.1 core):
+
+| ruta | construir | repintado | offscreen | riesgo |
+|---|---|---|---|---|
+| QSS (fondo base) | 2–3 ms | 0,6–1,1 ms | sí | ninguno |
+| isla QML (`QQuickWidget`) | 68 ms caliente / ~230 ms frío | 0,07–0,19 ms | **sí** | motor QML en el arranque |
+| shader (`QOpenGLWidget`) | 2,5–12 ms | ~0,1 ms | **no pinta** | **API errónea revienta el proceso** |
+
+El shader quedó **descartado con datos**, por tres motivos reproducidos: `QOpenGLFunctions`
+no existe en PyQt6 (es `QOpenGLFunctions_4_1_Core`; usar la mala aborta con `0xC0000409` y sin
+traza); en `offscreen` —la plataforma de TODA la suite— `initializeGL`/`paintGL` no llegan a
+correr, así que el fondo sería intesteable; y en *core profile* sin VAO dibuja nada **en
+silencio**. La isla QML rinde igual de barato en régimen y **sí** pinta offscreen.
+
+Como el precio de QML es el arranque del motor, el diseño es **perezoso**: el fondo del panel
+sigue siendo QSS y la isla solo se construye la primera vez que hay **algo que animar** (el
+motor entra en escuchando/procesando/hablando/reconectando). Un HUD recién abierto que no usa
+el motor **no paga QML**: el cold start queda como estaba.
+
+Tres invariantes (una por test en `test_accento.py`):
+
+1. **La isla no se construye en el constructor.** `HaloAcento.__init__` solo crea un widget
+   vacío; el `QQuickWidget` nace en `asegurar()`, que solo llama `animar()`. `reposar()` sin
+   isla no la construye.
+2. **El anillo va DETRÁS del panel**, con `stackUnder`, no `raise_`. Es un halo alrededor, no
+   una capa que tape el texto: se coloca a `panel.geometry()` ajustada ±6 px.
+3. **El QML va embebido como cadena**, no como `.qml` del repo: el `QML_ACENTO` se escribe una
+   vez (en caliente) en el directorio de datos. El instalador tiene una lista explícita de
+   ficheros y un dato suelto sería un olvido silencioso.
+
+Si QtQuick no está o el QML falla, se registra y se sigue: el HUD funciona sin acento, como
+antes de la Fase 5. `closeEvent` suelta la isla (`apagar()`) para no dejar la animación QML
+viva contra una ventana cerrándose.
+
+**Ojo con el empaquetado (arreglado en la Fase 5).** `build_release.ps1` copia módulos por una
+lista explícita y paquetes por `$AppPackages`. Hasta esta fase faltaban `perf_instr.py`, `ui/`
+y `memory/` — los tres que `overlay.py`/`live_assistant.py` importan desde las Fases 0–4. El
+paquete compilaba pero la app instalada moría con `No module named 'ui'`. Si se añade un módulo
+o un paquete nuevo, hay que añadirlo a esa lista: la prueba de humo (`Test-Package`) importa
+todos los módulos y lo caza.
+
+Tests: 20 en `test_accento.py` (contrato del QML y del lazy leído del fuente, cableado del HUD,
+y la isla real sobre offscreen). El bug del tamaño 0×0 (la vista nacía después de colocar el
+halo) lo pilló el propio test que exige que el QML pinte tinta.
+
 ## El grafo (graphify) — la memoria entre sesiones
 
 **886 nodos · 1 744 aristas · 46 comunidades** (reconstruido 2026-09-30, commit `2c8462c`).
@@ -409,8 +457,8 @@ nombres y las líneas sí son exactos.
 
 ## Estado del repo
 
-> Última revisión: 2026-09-30 — commit `42a5d93` (contador de animaciones) + Fase 4
-> (panel de diagnóstico del HUD, `Ctrl+Shift+D`). Suite: **259/259** en 10 ficheros.
+> Última revisión: 2026-09-30 — commit `4f1fc47` (panel de diagnóstico, Fase 4) + Fase 5
+> (capa de acento QML perezosa y arreglo del empaquetado). Suite: **282/282** en 11 ficheros.
 
 - Rama con 5 commits, `v0.1.0` tagueado. **`AGENTS.md` (este fichero) nunca se ha commiteado**
   — es memoria local. Si quieres que sobreviva a otra máquina, commitéalo.

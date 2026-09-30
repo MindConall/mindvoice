@@ -106,6 +106,12 @@ from ui import tokens as TKN
 # transparente.
 from ui.animations import Desvanecer, Fade
 
+# Capa de acento (Fase 5): anillo QML que respira con el estado del motor. Se
+# importa la CLASE, pero la isla QML no se construye al importar ni al crear el
+# HUD: solo cuando el motor entra en un estado que merece el acento. Así el
+# arranque en frío no paga el motor QML (medido: 70-230 ms).
+from ui.accento import HaloAcento
+
 logger = logging.getLogger(__name__)
 
 # Cada cuánto se refresca el panel de diagnóstico. Un segundo es suficiente
@@ -552,6 +558,11 @@ class OverlayHud(QWidget):
         self._perf_lbl: QLabel | None = None
         self._perf_timer: QTimer | None = None
         self._perf_shortcut: QShortcut | None = None
+        # Capa de acento (Fase 5). Igual que el panel de diagnóstico, se declara
+        # aquí y se construye en `_build_panel`: así una instancia duplicada del
+        # HUD (que retorna antes de construir) no tiene un halo a medias.
+        self._halo: HaloAcento | None = None
+        self._halo_estado = ""
 
         self._single_ok = self._acquire_single_instance()
         if not self._single_ok:
@@ -1287,6 +1298,13 @@ class OverlayHud(QWidget):
         self._perf_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
         self._perf_shortcut.activated.connect(self._toggle_perf)
 
+        # Capa de acento (Fase 5). Hijo de la ventana, no del panel: va por
+        # DEBAJO del panel para que el anillo asome por los bordes redondeados
+        # sin tapar el texto. Aquí solo se crea el widget vacío; la isla QML que
+        # lo pinta no existe todavía. La geometría no se fija aquí: el panel aún
+        # no está colocado. Se acomoda al mostrar el HUD y antes de encenderlo.
+        self._halo = HaloAcento(self)
+
         self._watchdog = QTimer(self)
         self._watchdog.setInterval(5000)
         self._watchdog.timeout.connect(self._watchdog_tick)
@@ -1730,6 +1748,20 @@ class OverlayHud(QWidget):
             outer.invalidate()
             outer.setGeometry(self.rect())
         self.chat.viewport().update()
+        self._acomodar_halo()
+
+    def _acomodar_halo(self) -> None:
+        """Coloca el anillo de acento alrededor del panel y lo deja por debajo.
+
+        El panel cambia de alto al abrir Ajustes o el panel de diagnóstico, y de
+        ancho al moverse de monitor: el halo tiene que seguirlo. Va con
+        ``stackUnder`` y no con ``raise_`` porque su sitio es DETRÁS del panel:
+        es un halo, no una capa que tape el contenido.
+        """
+        if self._halo is None:
+            return
+        self._halo.sincronizar_geometria(self.panel.geometry())
+        self._halo.stackUnder(self.panel)
 
     # ------------------------------------------------------------------
     # Panel de diagnóstico (Fase 4)
@@ -2545,6 +2577,10 @@ class OverlayHud(QWidget):
         if self._anim_panel is not None:
             self._anim_panel.stop()
             self._anim_panel = None
+        # La isla QML del acento se suelta aquí: si no, el motor QML seguiría con
+        # su respiración viva contra una ventana que se está destruyendo.
+        if self._halo is not None:
+            self._halo.apagar()
         self._stop_hotkey()
         self._stop_ptt()
         self._stop_worker()
@@ -2843,6 +2879,29 @@ class OverlayHud(QWidget):
         self._state_lbl.setStyleSheet(
             f"color:{colors.get(label, TKN.tinta_suave)};font:11px 'Consolas';"
         )
+        self._refrescar_halo(label, colors.get(label, TKN.tinta_suave))
+
+    def _refrescar_halo(self, label: str, color: str) -> None:
+        """Enciende o apaga el acento según el estado del motor.
+
+        Aquí, y solo aquí, se paga el arranque del motor QML: un estado que
+        merece acento (escuchando/procesando/hablando/reconectando) lo carga la
+        primera vez. En reposo no se carga nada, así que un HUD recién abierto
+        que no usa el motor no paga QML.
+
+        Si la isla no está disponible (sin QtQuick, QML inválido), ``animar``
+        devuelve sin más y el HUD se queda como estaba: con acento no, pero
+        funcionando.
+        """
+        if self._halo is None:
+            return
+        if label in ("escuchando", "procesando", "hablando", "reconectando"):
+            self._acomodar_halo()
+            self._halo.animar(label, color)
+            self._halo_estado = label
+        else:
+            self._halo.reposar()
+            self._halo_estado = ""
 
     def _on_submit(self) -> None:
         text = self.input.text().strip()

@@ -1,0 +1,46 @@
+{
+  "fase": 5,
+  "medido_con": "Python 3.13, PyQt6 6.11 / Qt 6.11, Radeon RX 580 (GL 4.1 core) para el shader y offscreen para la isla QML. Panel real de 416x390. Sin red.",
+  "objetivo": "Elegir con numeros como se dibuja el acento del HUD, y no pagar el motor QML en el arranque en frio si no hace falta.",
+  "rutas_medidas": {
+    "qss_actual": {
+      "construir_ms": [1.82, 3.0],
+      "repintado_ms": [0.605, 1.062],
+      "offscreen": "si",
+      "riesgo": "ninguno"
+    },
+    "isla_qml": {
+      "construir_ms_caliente": [67.88, 99.89],
+      "construir_ms_frio": 230.65,
+      "repintado_ms": [0.065, 0.188],
+      "offscreen": "si (testeable)",
+      "riesgo": "motor QML en el arranque, si se paga"
+    },
+    "shader_gl_4_1": {
+      "construir_ms": [2.5, 11.51],
+      "repintado_ms": [0.077, 0.136],
+      "offscreen": "NO (initializeGL/paintGL no corren)",
+      "riesgo": "API equivocada aborta el proceso (0xC0000409) sin traza; sin VAO en core profile no dibuja nada en silencio"
+    }
+  },
+  "decision": "isla QML, cargada en perezoso",
+  "diseno": {
+    "fondo_base": "QSS (sin cambios, coste 0)",
+    "isla_qml": "se construye en el primer estado que merece acento (escuchando/procesando/hablando/reconectando)",
+    "arranque_en_frio": "sin cambios: un HUD recien abierto no paga QML",
+    "qml_embebido": true,
+    "anillo_detras_del_panel": true,
+    "margen_anillo_px": 6,
+    "degradado_si_no_hay_qtquick": "el HUD sigue sin acento"
+  },
+  "bug_real_corregido": "La vista QML nacia 0x0 e invisible: se crea (lazy) DESPUES de colocar el halo, asi que una geometria puesta a mano a la vista no llegaba. Arreglado con un layout sin margenes. Lo pillo el test que exige que el QML pinte tinta.",
+  "empaquetado_corregido": "build_release.ps1 no copiaba perf_instr.py, ui/ ni memory/: el paquete compilaba pero la app instalada moria con 'No module named ui'.",
+  "pruebas": {
+    "ficheros": 11,
+    "tests": 282,
+    "pasan": 282,
+    "fallan": 0,
+    "nuevo_test_accento": 20
+  },
+  "veredicto": "El shader queda descartado con datos (intesteable offscreen y revienta por API). La isla QML rinde igual de barato en regimen y si se prueba offscreen; su unico coste, el arranque del motor, se paga solo cuando el motor empieza a trabajar, nunca en frio."
+}

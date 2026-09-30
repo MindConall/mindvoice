@@ -10,6 +10,25 @@ publicación lo lee y lo antepone a las instrucciones de instalación, así que
 
 ## [No publicado]
 
+### Añadido
+
+**Un halo que respira alrededor del panel mientras el motor trabaja.** Cuando MindVoice
+está escuchando, procesando o hablando, el panel se rodea de un anillo del color de ese
+estado que late despacio. Se dibuja con una isla QML que **no existe hasta la primera vez
+que hace falta**: si abres el HUD y no usas el motor, el arranque no cambia ni un
+milisegundo. Se eligió QML frente a un shader midiendo ambas: el shader no se puede pintar
+en la plataforma sin pantalla con la que corren las pruebas y una llamada equivocada a su
+API tumbaba el proceso entero.
+
+### Corregido
+
+**El instalador no llevaba tres de sus propias piezas.** `build_release.ps1` copia el código
+por una lista explícita, y esa lista se quedó sin `perf_instr.py`, sin el paquete `ui/` y
+sin el paquete `memory/` que el HUD y el motor importan desde hace varias versiones. El
+paquete se construía igual, así que el fallo solo aparecía en la app instalada, al morir en
+el arranque con `No module named 'ui'`. Ahora se copian los tres y la prueba de humo del
+empaquetado importa cada módulo para que un olvido así no vuelva a pasar en silencio.
+
 ## [0.1.1] - 2026-09-30
 
 Correcciones y mejoras sobre 0.1.0. Sin cambios de interfaz ni de formato de
