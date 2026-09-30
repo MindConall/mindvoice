@@ -335,6 +335,15 @@ _RESPONSE_STALL_TIMEOUT = 30.0
 # turno cerrado no es uso normal, así que se fuerza el cierre.
 _VOICE_MAX_OPEN_S = 300.0
 
+# Margen para considerar que "el audio sigue saliendo". Con VAD manual la base
+# del tope de arriba se refresca mientras se habla, porque hablar es una
+# actividad de duración indefinida por diseño; pero si esa mano se extiende a
+# un micrófono abierto y MUDO (el usuario se fue con el turno a medias) el
+# watchdog queda anulado justo en el atasco que debe atrapar, y el micro sigue
+# subiendo audio hasta que el servidor responde 1011 "Resource has been
+# exhausted". Solo se refresca si en los últimos 2 s pasó audio de verdad.
+_VOICE_FLOW_GRACE_S = 2.0
+
 # Margen de gracia tras el último dato de contenido de la respuesta (audio,
 # texto o transcripción de salida). Si el servidor NO envía ``turn_complete`` a
 # pesar de que el modelo ya terminó de hablar (turno RECORTADO por el tope de
@@ -1235,10 +1244,18 @@ class LiveAssistant:
         self._reset_count = 0
         self._reset_window_start = time.monotonic()
         self._voice_wants = False      # bajo self._lock, sobrevive a reconexiones
+        # True si el turno lo abrió una pulsación del usuario (turno acotado) y
+        # False si es escucha continua. Solo el primero puede cerrarse solo por
+        # silencio; la escucha continua espera a que se apague a mano.
+        self._voice_toggle = False
         self._voice_event: Optional[asyncio.Event] = None
         # Momento (loop.time) en que se abrió la voz actual; ``None`` si no hay
         # voz. Lo usa el watchdog para el tope absoluto ``_VOICE_MAX_OPEN_S``.
         self._voice_opened_ts: Optional[float] = None
+        # Último instante (loop.time) en que salió audio real por encima del
+        # gate. Distingue "está hablando" de "micrófono abierto y mudo", que es
+        # lo que el watchdog necesita para no refrescarse eternamente.
+        self._voice_last_audio_ts: Optional[float] = None
         self._lock = threading.Lock()
         self._client = genai.Client(
             api_key=settings.api_key,
@@ -1257,15 +1274,41 @@ class LiveAssistant:
         self._loop.call_soon_threadsafe(self._command_queue.put_nowait, text)
         return True
 
-    def set_voice(self, active: bool) -> bool:
+    def set_memory_enabled(self, activo: bool) -> bool:
+        """Enciende o apaga la memoria en caliente, sin reiniciar la app.
+
+        Apagada significa que no se escribe nada nuevo y que la recuperación no
+        inyecta recuerdos: es lo que quiere quien dice "no quiero que se acuerde
+        de esto". El índice se suelta en vez de vaciarse, así que volver a
+        encenderla recupera lo que hubiera.
+        """
+        activo = bool(activo)
+        with self._lock:
+            if bool(self._settings.memory_enabled) == activo:
+                return False
+            self._settings.memory_enabled = activo
+            self._memoria_indice = None if not activo else self._preparar_indice_memoria()
+        logger.info(
+            "Memoria %s.", "activada" if activo else "apagada"
+        )
+        return True
+
+    def set_voice(self, active: bool, *, toggle: bool = False) -> bool:
         """Activa o desactiva la entrada por micrófono (seguro desde otro hilo).
 
         El estado queda guardado para las reconexiones de la sesión. Mientras
         está activa, la voz transmitida interrumpe (barge-in) la respuesta en
         curso del modelo automáticamente.
+
+        *toggle* distingue una pulsación del usuario (turno acotado, que puede
+        cerrarse solo por silencio) de la escucha continua (abierta hasta que
+        se apague). Sin esa distinción, con ``voice_manual_vad`` el turno solo
+        se cerraba al pulsar por segunda vez y el micrófono se quedaba abierto
+        sin avisar: el usuario hablaba y no recibía respuesta nunca.
         """
         with self._lock:
             self._voice_wants = bool(active)
+            self._voice_toggle = bool(active and toggle)
             event = self._voice_event
             loop = self._loop
         if event is not None and loop is not None and loop.is_running():
@@ -1478,6 +1521,9 @@ class LiveAssistant:
         try:
             from memory.migrate import get_backend, migrar
 
+            if not getattr(self._settings, "memory_enabled", True):
+                logger.info("Memoria desactivada en Ajustes; se usa solo la plana.")
+                return None
             base = (self._settings.data_dir or "").strip()
             if not base:
                 logger.info("Sin directorio de datos; la memoria va solo en plano.")
@@ -1486,11 +1532,33 @@ class LiveAssistant:
             if indice.nombre == "plano":
                 return None
             migrar(indice, _MEMORY_FILE, _PERMANENT_FILE)
+            self._podar_memoria(indice)
             logger.info("Índice de memoria en grafo activo (%s).", indice.nombre)
             return indice
         except Exception as exc:  # noqa: BLE001 - la memoria nunca tumba la app
             logger.warning("Sin índice de grafo para la memoria (%s); se usa el plano.", exc)
             return None
+
+    def _podar_memoria(self, indice) -> None:
+        """Recorta el grafo al arrancar, con los topes de Ajustes.
+
+        Va aquí y no en cada recuerdo porque podar es lo que reescribe el fichero
+        entero; hacerlo en cada escritura lo convertiría en un coste por turno.
+        Una vez al abrir la app es suficiente para que no crezca sin freno.
+        """
+        try:
+            topes = int(getattr(self._settings, "memory_max_nodes", 0) or 0)
+            dias = int(getattr(self._settings, "memory_retention_days", 0) or 0)
+            if topes <= 0 and dias <= 0:
+                return
+            fuera = indice.podar(max_nodos=topes or None, max_dias=dias or None)
+            if fuera:
+                logger.info("Memoria podada al arrancar: %d recuerdos fuera.", fuera)
+        except AttributeError:
+            # Backend sin poda (el plano): la retención la aplica él solo.
+            logger.debug("El backend de memoria no admite poda.")
+        except Exception as exc:  # noqa: BLE001 - podar nunca debe tumbar el arranque
+            logger.warning("No se pudo podar la memoria: %s", exc)
 
     def _preparar_memoria_trabajo(self):
         """Monta el registro de turnos. Nunca lanza: es una capa opcional."""
@@ -2743,10 +2811,24 @@ class LiveAssistant:
             dropped = 0
             send_failed = False
             voice_started = False
-            # VAD manual: el turno solo lo cierra el usuario al soltar el
-            # botón, así que ni el silencio del servidor ni el segmentador local
-            # pueden cortarlo.
+            # El silencio local solo corta el turno si ``auto_close_s`` dice que
+            # sí (se calcula justo debajo): en escucha continua con VAD manual,
+            # una pausa al pensar NO puede cerrar la frase.
             manual_vad = bool(self._settings.voice_manual_vad)
+            # Silencio tras el cual se cierra el turno por su cuenta:
+            #   - VAD automático: 1,0 s, el comportamiento de siempre.
+            #   - VAD manual + turno abierto a pulsación: ``voice_toggle_silence``
+            #     (2,5 s por defecto). Antes NO se cerraba nunca y el usuario
+            #     pulsaba, hablaba y no pasaba nada hasta pulsar por segunda
+            #     vez, sin ningún aviso. El HUD dice "suelta el botón" y en
+            #     toggle soltar no hace nada: era un callejón sin salida.
+            #   - VAD manual + escucha continua: nunca se cierra solo, que es
+            #     justo para lo que existe el VAD manual (hablar indefinido).
+            auto_close_s: Optional[float] = None
+            if not manual_vad:
+                auto_close_s = _VOICE_SEGMENT_SILENCE_S
+            elif self._voice_toggle and float(self._settings.voice_toggle_silence) > 0:
+                auto_close_s = float(self._settings.voice_toggle_silence)
             # Cierre de frase por silencio LOCAL (con el micrófono abierto):
             # momento del último fragmento por encima del gate y si el turno
             # actual ya se cerró solo esperando la respuesta del modelo.
@@ -2796,16 +2878,16 @@ class LiveAssistant:
                     ):
                         segment_closed = False
                     if not segment_closed and not send_failed:
-                        # VAD manual: NO se cierra el turno por una pausa. El
-                        # único fin de turno es soltar el botón. Aquí es donde se
-                        # colgaba antes: una pausa de 1 s al pensar (o una coma
-                        # al hablar) cerraba la frase y la IA contestaba a mitad
-                        # de lo que el usuario iba a decir.
+                        # Una pausa al pensar NO debe cerrar la frase: por eso el umbral
+                        # del VAD automático es de 1 s y el de toggle 2,5 s, y
+                        # en escucha continua el silencio no cierra nada. Aquí
+                        # es donde se colgaba antes: con 1 s la IA contestaba a
+                        # mitad de lo que el usuario iba a decir.
                         if (
-                            not manual_vad
+                            auto_close_s is not None
                             and sent > 0
                             and last_loud_ts is not None
-                            and now - last_loud_ts >= _VOICE_SEGMENT_SILENCE_S
+                            and now - last_loud_ts >= auto_close_s
                         ):
                             try:
                                 if not note_sent:
@@ -2928,6 +3010,7 @@ class LiveAssistant:
                             sent_total += 1
                             self._voice_sending = True
                             last_loud_ts = asyncio.get_running_loop().time()
+                            self._voice_last_audio_ts = last_loud_ts
                             cap = int(
                                 _VOICE_REPLAY_MAX_S
                                 * mic_settings.input_rate
@@ -5217,7 +5300,20 @@ class LiveAssistant:
                 # audio de verdad. El tope sigue protegiendo a quien habla y solo
                 # queda para el micrófono ABIERTO Y MUDO, que es el atasco real
                 # (PTT pegado, sin voz).
-                if self._voice_sending and self._settings.voice_manual_vad:
+                if (
+                    self._voice_sending
+                    and self._settings.voice_manual_vad
+                    # Solo mientras sale audio de verdad. Antes se refrescaba la
+                    # base en TODO turno con VAD manual, con lo que el tope
+                    # absoluto no podía dispararse jamás en el único caso que
+                    # protege: micro abierto y callado. Medido el 30/09: 4 min
+                    # de micro abierto y 0 turnos -> el servidor cortó con
+                    # 1011 "Resource has been exhausted" y el turno ya no se
+                    # transcribía.
+                    and self._voice_last_audio_ts is not None
+                    and loop.time() - self._voice_last_audio_ts
+                    < _VOICE_FLOW_GRACE_S
+                ):
                     if self._voice_opened_ts is not None:
                         self._voice_opened_ts = loop.time()
                 elif (

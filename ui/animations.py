@@ -40,6 +40,7 @@ from PyQt6.QtCore import (
     QEasingCurve,
     QObject,
     QPropertyAnimation,
+    pyqtSignal,
 )
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
@@ -147,6 +148,21 @@ class _Opacidad:
             pass
         return self._ultima
 
+    def forzar_opaco(self) -> None:
+        """Devuelve el widget a opacidad total, pase lo que pase.
+
+        Una transición interrumpida a medias (el usuario abre y cierra el
+        overlay deprisa) no puede dejar el panel a media opacidad: ni se ve bien
+        ni se puede retirar el efecto, porque ``soltar()`` solo lo quita cuando
+        la opacidad ya es completa. Sin esto, el efecto se quedaba puesto para
+        siempre y las siguientes animaciones lo adoptaban como "suyo".
+        """
+        try:
+            self._destino.setProperty(self._propiedad.decode(), 1.0)
+        except RuntimeError:  # el efecto o el widget ya no existen
+            return
+        self._ultima = 1.0
+
     def soltar(self) -> None:
         """Retira el efecto si es nuestro y ya no se nota.
 
@@ -187,6 +203,11 @@ class _AnimacionOpacidad(QObject):
     sube.
     """
 
+    # Avisa de CUÁNDO termina la animación, para quien lo necesite (el overlay
+    # oculta la ventana al desvanecerse el panel). Igual que Qt, NO se emite al
+    # ``stop()``: fingirlo sería mentir sobre el único caso en que importa.
+    finished = pyqtSignal()
+
     def __init__(self, widget, desde: float, duracion_ms: int, parent=None) -> None:
         super().__init__(parent or widget)
         self._widget = widget
@@ -200,6 +221,7 @@ class _AnimacionOpacidad(QObject):
         # `stop()` destruye la animación y volver a arrancarla revienta. Aquí la
         # animación vive lo que su contenedor, y se puede repetir.
         self._anim.finished.connect(self._al_terminar)
+        self._anim.finished.connect(self.finished)
         self.destroyed.connect(_descontar_al_destruirse)
 
     def _contar(self) -> None:
@@ -216,6 +238,10 @@ class _AnimacionOpacidad(QObject):
 
     def _al_terminar(self) -> None:
         self._descontar()
+        # El efecto se retira aquí y no en cada subclase: da igual cómo acabara
+        # el turno (terminada, interrumpida o parada a mano), el widget vuelve a
+        # su estado normal.
+        self._opacidad.soltar()
 
     def start(self) -> None:
         if not self._opacidad.animable:
@@ -225,8 +251,13 @@ class _AnimacionOpacidad(QObject):
 
     def stop(self) -> None:
         self._anim.stop()
-        # `finished` no salta al parar, así que hay que restar aquí también.
-        self._descontar()
+        # `finished` no salta al parar, así que hay que restar la cuenta Y
+        # devolver el widget: si no, una animación interrumpida a mitad (el
+        # usuario abre y cierra el overlay deprisa) dejaba el efecto de
+        # opacidad instalado para el resto de la sesión, con el widget pagando
+        # un renderizado extra en cada paint.
+        self._opacidad.forzar_opaco()
+        self._al_terminar()
 
     @property
     def opacidad_actual(self) -> float:
@@ -246,10 +277,6 @@ class Fade(_AnimacionOpacidad):
         self._anim.setStartValue(float(desde))
         self._anim.setEndValue(float(hasta))
         self._anim.setEasingCurve(_curve(tokens.CURVA_ENTRADA))
-
-    def _al_terminar(self) -> None:
-        super()._al_terminar()
-        self._opacidad.soltar()
 
 
 class Pulso(_AnimacionOpacidad):
@@ -292,11 +319,6 @@ class Desvanecer(_AnimacionOpacidad):
         self._anim.setEndValue(0.0)
         self._anim.setEasingCurve(_curve(tokens.CURVA_SALIDA))
         self._anim.finished.connect(self._ocultar)
-
-    def _al_terminar(self) -> None:
-        super()._al_terminar()
-        # Al terminar en 0 no hay nada que retirar: el widget está oculto.
-        self._opacidad.soltar()
 
     def _ocultar(self) -> None:
         try:

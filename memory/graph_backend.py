@@ -27,6 +27,7 @@ import math
 import os
 import re
 import threading
+from datetime import datetime, timedelta, timezone
 
 from .base import (
     BLOCK_BUDGET,
@@ -543,6 +544,85 @@ if l["source"] != entry_id and l["target"] != entry_id
         return "\n\n".join(secciones)
 
     # ------------------------------------------------------------------ diagnóstico
+    def podar(self, max_nodos: int | None = None, max_dias: int | None = None) -> int:
+        """Recorta el grafo y devuelve cuántos recuerdos se fueron.
+
+        El grafo solo crece y el fichero entero se reescribe en cada cambio, así
+        que en una sesión larga el coste deja de ser despreciable (medido: 4 MB
+        y 1418 nodos). Se poda por dos lados, siempre en este orden:
+
+        1. **Antigüedad**: lo más viejo que no sea etiqueta ni permanente.
+        2. **Volumen**: si aun así se pasa de ``max_nodos``, cae lo menos
+           relevante, no lo nuevo.
+
+        Las etiquetas nunca se tocan: son el hilo del tema, y son lo que hace que
+        "lo de Python" siga significando algo cuando se olvidan los mensajes
+        concretos.
+        """
+        desde = None
+        if max_dias and max_dias > 0:
+            desde = (
+                datetime.now(timezone.utc) - timedelta(days=float(max_dias))
+            ).isoformat()
+        with self._lock:
+            antes = len(self._idx)
+            protegidos = {
+                n["id"]
+                for n in self._grafo["nodes"]
+                if n.get("kind") in ("tag", "permanent")
+            }
+            candidatos = [
+                n for n in self._grafo["nodes"] if n["id"] not in protegidos
+            ]
+            # Lo más viejo primero. El campo es ``created_at``, no ``ts``: el nodo no
+            # tiene ``ts`` y ordenar por él era ordenar por None, o sea por el
+            # orden de lista, que por casualidad dejaba lo nuevo. Un nodo SIN
+            # fecha se trata como recientísimo ("9999"): si no, un registro
+            # antiguo sin marca se podaría antes que uno nuevo.
+            def _antiguedad(n: dict) -> str:
+                return str(n.get("created_at") or "9999")
+
+            candidatos.sort(key=_antiguedad)
+
+            if desde is not None:
+                mantener = {n["id"] for n in candidatos if _antiguedad(n) >= desde}
+                self._borrar_nodos(
+                    n["id"] for n in candidatos if n["id"] not in mantener
+                )
+                candidatos = [n for n in candidatos if n["id"] in mantener]
+
+            if max_nodos and max_nodos > 0:
+                vivos = len(self._grafo["nodes"])
+                if vivos > max_nodos:
+                    # Por aquí se cae: lo menos importante y más viejo primero.
+                    candidatos.sort(
+                        key=lambda n: (
+                            float(n.get("importance") or 0.0),
+                            _antiguedad(n),
+                        )
+                    )
+                    self._borrar_nodos(
+                        n["id"] for n in candidatos[: vivos - max_nodos]
+                    )
+
+            self._reindexar()
+            self._persistir()
+            return antes - len(self._idx)
+
+    def _borrar_nodos(self, ids) -> None:
+        """Quita nodos y sus aristas. El llamante ya tiene el ``_lock``."""
+        ids = {i for i in ids}
+        if not ids:
+            return
+        self._grafo["nodes"] = [
+            n for n in self._grafo["nodes"] if n["id"] not in ids
+        ]
+        self._grafo["links"] = [
+            l
+            for l in self._grafo["links"]
+            if l["source"] not in ids and l["target"] not in ids
+        ]
+
     def estadisticas(self) -> dict:
         with self._lock:
             por_tipo: dict[str, int] = {}

@@ -64,6 +64,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -71,6 +72,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -93,6 +95,14 @@ from prefs import apply_prefs, load_prefs, save_prefs
 # Tokens de diseno (Fase 3/4): el QSS de este archivo toma color,
 # radio y tipografia de aqui, sin cambiar los valores que ya se veian.
 from ui import tokens as TKN
+
+# Animaciones del HUD. Se animan sobre el PANEL (widget hijo), nunca con
+# `setWindowOpacity`: esa última solo vale para ventanas de nivel superior y en
+# un hijo Qt la ignora en silencio, así que el fundido no se vería. Además
+# `setWindowOpacity` y ya está documentado que multiplicar el alpha de la
+# ventana lo acumulaba con el `rgba` del fondo y dejaba el panel el doble de
+# transparente.
+from ui.animations import Desvanecer, Fade
 
 logger = logging.getLogger(__name__)
 
@@ -909,6 +919,81 @@ class OverlayHud(QWidget):
         )
         s_layout.addWidget(self._manual_vad_check)
 
+        # Silencio que cierra el turno en modo alterno. Es el ajuste que hace
+        # que "pulsas, hablas y esperas" funcione, así que va justo debajo del
+        # modo de voz y no escondido en un advanced.
+        silencio = QDoubleSpinBox()
+        silencio.setRange(0.0, 15.0)
+        silencio.setSingleStep(0.5)
+        silencio.setDecimals(1)
+        silencio.setSuffix(" s")
+        silencio.setValue(float(getattr(self._settings, "voice_toggle_silence", 2.5) or 0.0))
+        silencio.setToolTip(
+            "En modo alterno, cuántos segundos de silencio cierran el turno y "
+            "envían lo que has dicho.\n"
+            "0 = solo se envía al pulsar por segunda vez (el comportamiento "
+            "antiguo, que no avisaba de nada).\n"
+            "1 s era demasiado corto: cortaba la frase a mitad al pensar."
+        )
+        self._toggle_silence_spin = silencio
+        s_layout.addWidget(self._combo_row("CIERRE POR SILENCIO", silencio, False))
+
+        # ---- Memoria ----------------------------------------------------
+        # El grafo de memoria no tenía ningún control: sepongía solo, growing
+        # sin freno, hasta llegar a megabytes. Aquí se puede apagar, limitar por
+        # cantidad y por antigüedad, y vaciarlo entero.
+        self._memory_check = QCheckBox("Recordar entre sesiones (memoria)")
+        self._memory_check.setStyleSheet(
+            f"color:{TKN.tinta_media}; font:11px 'Consolas';"
+            " QCheckBox::indicator { width:14px; height:14px; }"
+        )
+        self._memory_check.setToolTip(
+            "Activado: MindVoice recuerda lo que cuentas y lo usa al responder.\n"
+            "Desactivado: cada turno va sin memoria, como la primera versión."
+        )
+        self._memory_check.setChecked(bool(getattr(self._settings, "memory_enabled", True)))
+        s_layout.addWidget(self._memory_check)
+
+        self._memory_nodes_spin = QSpinBox()
+        self._memory_nodes_spin.setRange(0, 200000)
+        self._memory_nodes_spin.setSingleStep(250)
+        self._memory_nodes_spin.setSpecialValueText("sin tope")
+        self._memory_nodes_spin.setValue(
+            int(getattr(self._settings, "memory_max_nodes", 2000) or 0)
+        )
+        self._memory_nodes_spin.setToolTip(
+            "Máximo de recuerdos guardados. Al superar el tope se olvidan los\n"
+            "menos importantes, nunca los más recientes. 0 = sin tope."
+        )
+        s_layout.addWidget(self._combo_row("TOPE DE RECUERDOS", self._memory_nodes_spin, False))
+
+        self._memory_days_spin = QSpinBox()
+        self._memory_days_spin.setRange(0, 3650)
+        self._memory_days_spin.setSuffix(" días")
+        self._memory_days_spin.setSpecialValueText("sin tope")
+        self._memory_days_spin.setValue(
+            int(getattr(self._settings, "memory_retention_days", 90) or 0)
+        )
+        self._memory_days_spin.setToolTip(
+            "Antigüedad máxima de un recuerdo. 0 = se guarda para siempre."
+        )
+        s_layout.addWidget(self._combo_row("ANTIGÜEDAD", self._memory_days_spin, False))
+
+        self._memory_stats = QLabel("")
+        self._memory_stats.setStyleSheet(
+            f"color:{TKN.tinta_suave}; font:10px 'Consolas';"
+        )
+        s_layout.addWidget(self._memory_stats)
+
+        self._memory_purge_btn = QPushButton("Vaciar memoria")
+        self._memory_purge_btn.setStyleSheet(_BTN_CANCEL_QSS)
+        self._memory_purge_btn.setToolTip(
+            "Olvida todos los recuerdos conservando el hilo de los temas.\n"
+            "No se puede deshacer."
+        )
+        self._memory_purge_btn.clicked.connect(self._on_purge_memory)
+        s_layout.addWidget(self._memory_purge_btn)
+
         self._modes_combo = QComboBox()
         self._modes_combo.addItem("Solo voz", "audio")
         self._modes_combo.addItem("Voz + texto en pantalla", "audio_text")
@@ -1127,6 +1212,11 @@ class OverlayHud(QWidget):
         self._blink = QTimer(self)
         self._blink.setInterval(500)
         self._blink.timeout.connect(self._blink_tick)
+        # Fundido de entrada/salida del panel. Vive aquí para poder pararlo si
+        # se repite la acción a mitad, y para que al cerrar la ventana no quede
+        # una animación contando sola.
+        self._anim_panel = None
+        self._cerrando = False
 
         self._poll = QTimer(self)
         self._poll.setInterval(60)
@@ -1320,7 +1410,7 @@ class OverlayHud(QWidget):
     # Voz (push-to-talk estilo Google) y cancelación
     # ------------------------------------------------------------------
     def _voice_start(self) -> None:
-        """El usuario mantiene pulsado el botón: transmite el micrófono."""
+        """El usuario abre un turno de voz (botón o tecla de alternancia)."""
         self._talking = True
         self._voice_btn.setText("Hablando…")
         self._voice_btn.setStyleSheet(
@@ -1328,9 +1418,31 @@ class OverlayHud(QWidget):
             " border:1px solid rgba(89,217,143,180); border-radius:12px;"
             " padding:5px 14px; font:12px 'Consolas'; }"
         )
-        self._set_status(f"{TKN.amarillo}", "Hablando…  (suelta el botón para responder)")
+        self._set_status(f"{TKN.amarillo}", self._voice_hint())
         self._blink.start()
-        self._set_engine_voice(True)
+        # ``toggle=True``: este turno lo ha abierto el usuario, así que puede
+        # cerrarse solo cuando se calle (ver ``voice_toggle_silence``). Con
+        # False, que es la escucha continua, no se cierra nunca solo.
+        self._set_engine_voice(True, toggle=True)
+
+    def _voice_hint(self) -> str:
+        """Qué tiene que hacer el usuario para cerrar el turno que tiene abierto.
+
+        Antes esto decia siempre "suelta el botón para responder", pero en modo
+        alterno soltar la tecla no hace NADA: el turno solo se cerraba al
+        pulsar por segunda vez. El HUD mandaba al usuario a la acción
+        equivocada y, si pulsaba una vez y esperaba, no pasaba nada en
+        silencio: parecia que el micrófono estaba roto.
+        """
+        if self._settings.mute_mode == "toggle":
+            silencio = float(getattr(self._settings, "voice_toggle_silence", 0.0) or 0.0)
+            if silencio > 0:
+                return (
+                    f"Escuchando…  (habla; se envía sola al parar "
+                    f"{silencio:g} s, o pulsa de nuevo para enviarla ya)"
+                )
+            return "Escuchando…  (pulsa de nuevo para enviar)"
+        return "Hablando…  (suelta el botón para responder)"
 
     def _show_voice_level(self, rms: float | None) -> None:
         """Muestra el nivel del micrófono en dB mientras se transmite."""
@@ -1416,11 +1528,20 @@ class OverlayHud(QWidget):
         self._set_engine_voice(self._continuous_voice)
         self._set_processing(False)
 
-    def _set_engine_voice(self, active: bool) -> None:
+    def _set_engine_voice(self, active: bool, *, toggle: bool = False) -> None:
         with self._lock:
             assistant = self._assistant
         if assistant is not None:
-            assistant.set_voice(bool(active))
+            assistant.set_voice(bool(active), toggle=bool(toggle))
+        elif active:
+            # El motor todavía no existe (la app arranca en ~4 s). No es un
+            # fallo: ``_worker_job`` reitera el estado al levantarlo, pero
+            # conviene dejarlo escrito en el log porque desde fuera parece un
+            # micrófono que se abre solo.
+            logger.info(
+                "Voz activada antes de que el motor arrancara; se aplicará "
+                "al conectar."
+            )
 
     def _on_cancel(self) -> None:
         self.add_history("Sys", "Cancelado por el usuario")
@@ -1686,6 +1807,10 @@ class OverlayHud(QWidget):
         prefs["speech_vocabulary"] = self._vocab_edit.text().strip()
         prefs["save_transcripts"] = self._transcript_check.isChecked()
         prefs["voice_manual_vad"] = self._manual_vad_check.isChecked()
+        prefs["voice_toggle_silence"] = self._toggle_silence_spin.value()
+        prefs["memory_enabled"] = self._memory_check.isChecked()
+        prefs["memory_max_nodes"] = self._memory_nodes_spin.value()
+        prefs["memory_retention_days"] = self._memory_days_spin.value()
         prefs["response_modalities"] = str(
             self._modes_combo.currentData() or "audio"
         ).strip()
@@ -1700,6 +1825,7 @@ class OverlayHud(QWidget):
         self._apply_runtime_audio(out or None, volume)
         self._apply_opacity(opacity)
         self._relabel_cap()
+        self._refrescar_memoria_en_vivo()
         changed = voice != applied_voice or lang != applied_lang
         if changed:
             self._apply_runtime_voice(voice, lang)
@@ -1788,6 +1914,71 @@ class OverlayHud(QWidget):
             return
         assistant.set_voice_name(voice)
         assistant.set_transcript_lang(lang)
+
+    # -- Memoria ---------------------------------------------------------
+    def _estadisticas_memoria(self) -> dict | None:
+        """Números reales del grafo, o ``None`` si no hay índice en marcha."""
+        with self._lock:
+            assistant = self._assistant
+        if assistant is None:
+            return None
+        try:
+            indice = getattr(assistant, "_memoria_indice", None)
+            if indice is None or not hasattr(indice, "estadisticas"):
+                return None
+            return indice.estadisticas()
+        except Exception as exc:  # noqa: BLE001 - es un dato cosmético
+            logger.debug("No se pudieron leer las estadísticas de memoria: %s", exc)
+            return None
+
+    def _refrescar_memoria_en_vivo(self) -> None:
+        """Pinta lo que hay en memoria y aplica el límite si se ha cambiado.
+
+        Apagar la memoria surte efecto sin reiniciar: se suelta el índice y se
+        reconstruye al guardar. Antes estos ajustes no existían, así que lo
+        único que se podía hacer con la memoria era dejar de escribirla.
+        """
+        activo = self._memory_check.isChecked()
+        self._memory_nodes_spin.setEnabled(activo)
+        self._memory_days_spin.setEnabled(activo)
+        self._memory_purge_btn.setEnabled(activo)
+
+        with self._lock:
+            assistant = self._assistant
+        if assistant is not None:
+            try:
+                assistant.set_memory_enabled(activo)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("El motor no admite cambiar la memoria en caliente: %s", exc)
+
+        stats = self._estadisticas_memoria()
+        if stats is None:
+            self._memory_stats.setText(
+                "memoria: sin índice (se guarda en plano)" if activo else "memoria: apagada"
+            )
+            return
+        if not activo:
+            self._memory_stats.setText("memoria: apagada")
+            return
+        extra = " · degradado" if stats.get("degradado") else ""
+        self._memory_stats.setText(
+            f"memoria: {stats['nodos']} nodos, {stats['aristas']} aristas, "
+            f"{stats.get('disputados', 0)} en disputa{extra}"
+        )
+
+    def _on_purge_memory(self) -> None:
+        """Vacía la memoria conservando el hilo de los temas."""
+        with self._lock:
+            assistant = self._assistant
+        indice = getattr(assistant, "_memoria_indice", None) if assistant else None
+        if indice is None:
+            self.add_history("Sys", "No hay índice de memoria que vaciar.")
+            return
+        if not indice.reset():
+            self.add_history("Sys", "No se pudo vaciar la memoria.")
+            return
+        self.add_history("Sys", "Memoria vaciada (se conservan los temas).")
+        self._refrescar_memoria_en_vivo()
 
     def _apply_runtime_modes(self, mode: str) -> None:
         """Propaga el modo de salida (solo voz / voz+texto) al motor."""
@@ -2094,11 +2285,14 @@ class OverlayHud(QWidget):
     # ------------------------------------------------------------------
     def show_overlay(self) -> None:
         self._settings_scroll.setVisible(self._settings_open)
+        self._cerrando = False
         self.show()
         self.raise_()
         self.activateWindow()
         self._relayout_panel()
         self._input_focus()
+        # Entra con un fundido corto en vez de aparecer de golpe.
+        self._fundir_panel(entrando=True)
         # Visible de verdad: el panel ya está en pantalla. Esta es la marca que
         # cierra la ventana de arranque.
         _perf.mark_ui_visible()
@@ -2134,10 +2328,62 @@ class OverlayHud(QWidget):
         self.input.selectAll()
 
     def hide_overlay(self) -> None:
-        self.hide()
+        """Desaparece con un fundido corto y, al terminar, oculta la ventana.
+
+        Se cubre con el flag ``_cerrando`` porque durante el fundido el panel
+        sigue visible: sin él, dos ``Ctrl+Shift+Z`` seguidos en el mismo
+        instante se pisarían y la ventana se quedaría a medio ocultar.
+        """
+        if self._cerrando:
+            return
+        self._cerrando = True
+        if not self.isVisible():
+            # Nunca se mostró: no hay nada que fundir.
+            self._cerrando = False
+            self.hide()
+            return
+        self._fundir_panel(entrando=False)
+
+    def _fundir_panel(self, *, entrando: bool) -> None:
+        """Aparece o desaparece el panel con un fundido de opacidad."""
+        panel = getattr(self, "panel", None)
+        if panel is None:
+            if not entrando:
+                self.hide()
+            return
+        anim = self._anim_panel
+        if anim is not None:
+            anim.stop()
+            # `disconnect()` sin ranura quita todas las de esta señal. Con
+            # ranura concreta revienta si esa ranura no estaba conectada (el
+            # `Fade` de entrada no la usa), que es lo que pasaba.
+            try:
+                anim.finished.disconnect()
+            except TypeError:
+                pass
+            self._anim_panel = None
+        if entrando:
+            panel.show()
+            nuevo = Fade(panel, desde=0.0, hasta=1.0, parent=self)
+            nuevo.start()
+        else:
+            nuevo = Desvanecer(panel, parent=self)
+            nuevo.finished.connect(self._panel_oculto)
+            nuevo.start()
+        self._anim_panel = nuevo
+
+    def _panel_oculto(self) -> None:
+        """Fin del desvanecido: la ventana entera se va."""
+        try:
+            self.hide()
+        except RuntimeError:  # la ventana ya se había destruido
+            pass
 
     def toggle(self) -> None:
-        if self.isVisible():
+        if self._cerrando:
+            # A medio desvanecer: la pulsación lo deja como estaba.
+            self.show_overlay()
+        elif self.isVisible():
             self.hide_overlay()
         else:
             self.show_overlay()
@@ -2158,6 +2404,11 @@ class OverlayHud(QWidget):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._watchdog_stop = True
         self._watchdog.stop()
+        # El fundido en curso se para aquí: si no, su ``finished`` dispara
+        # ``_panel_oculto`` contra una ventana que ya se está cerrando.
+        if self._anim_panel is not None:
+            self._anim_panel.stop()
+            self._anim_panel = None
         self._stop_hotkey()
         self._stop_ptt()
         self._stop_worker()
@@ -2319,8 +2570,12 @@ class OverlayHud(QWidget):
             hotkeys.start()
         except Exception as exc:
             logger.warning("No se pudieron registrar los atajos globales: %s", exc)
-        if self._continuous_voice or self._talking:
-            assistant.set_voice(True)
+            if self._continuous_voice or self._talking:
+                # Reitera el estado que el usuario dejó puesto mientras el motor
+                # aún no existía (la app tarda ~4 s en arrancarlo). Si el turno
+                # lo abrió una pulsación y no la escucha continua, es un turno
+                # acotado y puede cerrarse solo por silencio.
+                assistant.set_voice(True, toggle=bool(self._talking))
         try:
             loop.run_until_complete(assistant.run())
         except asyncio.CancelledError:

@@ -222,6 +222,13 @@ class Settings:
     # False = VAD AUTOMÁTICO (comportamiento anterior): el servidor decide el
     #         fin de turno por ``_VAD_SILENCE_MS`` de silencio.
     voice_manual_vad: bool = True
+    # En modo "toggle" el turno se cierra solo tras este silencio (s), en vez de
+    # esperar la segunda pulsación. Es generoso a propósito: el segmentador de
+    # 1,0 s del VAD automático cortaba la frase a mitad cuando el usuario
+    # pensaba o decía una coma. Con 2,5 s "pulsas, hablas y esperas" funciona,
+    # que es lo que espera cualquiera que no sepa que hay que pulsar dos veces.
+    # 0 = desactivado (el turno solo lo cierra la segunda pulsación).
+    voice_toggle_silence: float = 2.5
 
     # -- Reconexión ---------------------------------------------------------
     reconnect_max_delay: float = 30.0   # tope de espera entre reintentos (s)
@@ -253,6 +260,14 @@ class Settings:
     # de la conversación (Tú/IA/Web), con marca de hora. Sirve para repasar
     # qué se habló cualquier día sin depender de la memoria del modelo.
     save_transcripts: bool = True
+    # -- Memoria -----------------------------------------------------------
+    # El grafo de ``knowledge_graph.json`` solo crece, y cada recuerdo reescribe
+    # el fichero entero. Sin topes llega a megabytes (medido: 4 MB, 1418 nodos)
+    # y el coste por turno se nota. Con ``memory_max_nodes = 0`` o
+    # ``memory_retention_days = 0`` no se poda por ese lado.
+    memory_enabled: bool = True
+    memory_max_nodes: int = 2000
+    memory_retention_days: int = 90
     system_instruction: str = (
         "Eres MindVoice, un asistente de IA afilado, con criterio y con "
         "voz. El usuario te habla de lo que está viendo en su escritorio y "

@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from memory.base import (
     CONTESTED,
@@ -552,6 +554,125 @@ class TestRendimientoDeRecuperacion(unittest.TestCase):
             base._CACHE_PALABRAS_MAX,
             "la caché creció más de lo permitido",
         )
+
+
+class TestPodaDeLaMemoria(unittest.TestCase):
+    """La memoria tiene que dejar de crecer sola.
+
+    El grafo solo sumanba: cada recuerdo reescribe el fichero entero y nada
+    olvidaba nada. Medido en la app real: 4 MB y 1418 nodos, con el coste de
+    reescritura dentro del camino crítico de cada turno. ``podar`` es lo que
+    hace bounded eso, así que se prueba con las dos reglas: por volumen y por
+    antigüedad, y sobre todo que lo que se protege NO se toca.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="mv-poda-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.b = GraphBackend(self.dir)
+
+    def _llenar(self, n: int) -> None:
+        for i in range(n):
+            self.b.remember(f"recuerdo {i} sobre Python y listas de nombres", role="user")
+
+    def test_por_volumen_se_queda_en_el_tope(self) -> None:
+        self._llenar(60)
+        self.assertGreater(self.b.estadisticas()["nodos"], 60)
+        self.b.podar(max_nodos=30)
+        self.assertLessEqual(self.b.estadisticas()["nodos"], 34)
+
+    def test_lo_nuevo_no_es_lo_que_se_corta(self) -> None:
+        """Al pasarse del tope cae lo viejo, no lo recién dicho.
+
+        Si se cortara lo nuevo, la memoria empezaría a perder justo lo que el
+        usuario acaba de contar, que es lo único que quiere que recuerde. Se
+        comprueba contra el grafo guardado y no contra ``retrieve``: la
+        búsqueda devuelve solo unos pocos y su orden es por relevancia, así que
+        que el 59 no salga primero no significa que se haya perdido.
+        """
+        self._llenar(60)
+        self.b.podar(max_nodos=30)
+        numeros = sorted(
+            int(m.group(1))
+            for n in self.b._grafo["nodes"]
+            if (m := re.search(r"recuerdo (\d+)", n.get("description") or ""))
+        )
+        self.assertIn(59, numeros, "la poda se llevó el recuerdo más nuevo")
+        self.assertNotIn(0, numeros, "la poda NO se llevó el más viejo")
+        self.assertEqual(
+            list(range(34, 60)),
+            numeros,
+            "la poda debería haberse quedado con los 26 últimos",
+        )
+
+    def test_las_etiquetas_no_se_cortan_nunca(self) -> None:
+        """Las etiquetas son el hilo del tema y sobreviven a todo.
+
+        Aunque no queden recuerdos, "esto se habló de Python" tiene que seguir
+        ahí: es lo que hace que la siguiente pregunta sobre Python encuentre el
+        tema aunque los mensajes concretos se hayan olvidado.
+        """
+        self._llenar(60)
+        self.b.podar(max_nodos=10, max_dias=0)
+        self.b.podar(max_nodos=0, max_dias=1)
+        tags = self.b.estadisticas()["por_tipo"].get("tag", 0)
+        self.assertGreater(tags, 0, "la poda se llevó las etiquetas del tema")
+
+    def test_podar_por_antiguedad(self) -> None:
+        """Con ``max_dias`` caen los recuerdos anteriores al corte."""
+        self._llenar(30)
+        # Envejecer los recuerdos: si no, se acaban de crear y un tope de 1 día
+        # no tocaría ninguno, que es lo correcto pero no lo que se prueba aquí.
+        self._envejecer(400)
+        fuera = self.b.podar(max_dias=30)
+        self.assertEqual(30, fuera)
+        self.assertEqual(0, len(self.b.retrieve("python")))
+
+    def test_lo_reciente_no_cae_por_antiguedad(self) -> None:
+        """El tope de antigüedad respects lo dicho hace poco."""
+        self._llenar(10)
+        self.b.podar(max_dias=30)
+        self.assertGreater(
+            len(self.b.retrieve("python")),
+            0,
+            "la poda por antigüedad se llevó recuerdos de hace un momento",
+        )
+
+    def _envejecer(self, dias: int) -> None:
+        """Pone ``created_at`` de ``dias`` días atrás a todos los recuerdos."""
+        viejo = (
+            datetime.now(timezone.utc) - timedelta(days=dias)
+        ).isoformat()
+        for n in self.b._grafo["nodes"]:
+            n["created_at"] = viejo
+        self.b._reindexar()
+        self.b._persistir()
+
+    def test_un_tope_de_cero_no_poda(self) -> None:
+        """``0`` significa "sin tope", no "no dejes nada"."""
+        self._llenar(20)
+        antes = self.b.estadisticas()["nodos"]
+        self.b.podar(max_nodos=0, max_dias=0)
+        self.assertEqual(antes, self.b.estadisticas()["nodos"])
+
+    def test_la_poda_agrega_al_mismo_grafo(self) -> None:
+        """La poda tiene que respectar el grafo: sin aristas colgando."""
+        self._llenar(60)
+        self.b.podar(max_nodos=25)
+        ids = {n["id"] for n in self.b._grafo["nodes"]}
+        for l in self.b._grafo["links"]:
+            self.assertIn(l["source"], ids, "arista con origen que ya no existe")
+            self.assertIn(l["target"], ids, "arista con destino que ya no existe")
+
+    def test_se_puede_recordar_despues_de_podar(self) -> None:
+        """Podar no deja el índice inservible."""
+        self._llenar(60)
+        self.b.podar(max_nodos=20)
+        self.b.remember("un recuerdo nuevo y muy distinto", role="user")
+        self.assertTrue(self.b.retrieve("distinto"))
+        # Y sobrevive a una recarga desde disco.
+        otro = GraphBackend(self.dir)
+        self.assertGreaterEqual(otro.estadisticas()["nodos"], 1)
 
 
 if __name__ == "__main__":

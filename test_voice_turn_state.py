@@ -98,14 +98,43 @@ class _MicroFalso:
             self._tarea = None
 
 
-def _asistente():
+class _MicroQueSeCalla(_MicroFalso):
+    """Habla un momento y luego se calla: reproduce "pulsas, hablas y esperas".
+
+    Los trozos mudos van a cero, muy por debajo de cualquier gate, así que el
+    motor los descarta y ``last_loud_ts`` deja de avanzar. Es la escena que el
+    usuario reportaba: turno abierto, habla, y nada que cierre el turno.
+    """
+
+    def __init__(self, trozos_con_voz: int = 3, **kw) -> None:
+        super().__init__(**kw)
+        self.trozos_con_voz = int(trozos_con_voz)
+
+    async def _alimento(self) -> None:
+        voz = struct.pack(
+            "<%dh" % self.muestras, *([3000, -3000] * (self.muestras // 2))
+        )
+        mudo = struct.pack("<%dh" % self.muestras, *([0] * self.muestras))
+        while not self.cerrado:
+            for _ in range(max(1, self.trozos_con_voz)):
+                if self.cerrado:
+                    return
+                await self._cola.put(voz)
+                await asyncio.sleep(0.005)
+            self.trozos_con_voz = 0
+            while not self.cerrado:
+                await self._cola.put(mudo)
+                await asyncio.sleep(0.005)
+
+
+def _asistente(ajustes=None):
     """``LiveAssistant`` sin memoria en disco (no toca archivos del usuario)."""
     with mock.patch.object(
         la.LiveAssistant, "_load_memory", lambda self: []
     ), mock.patch.object(
         la.LiveAssistant, "_load_permanent", lambda self: []
     ):
-        return la.LiveAssistant(Settings(), HotkeyController())
+        return la.LiveAssistant(ajustes or Settings(), HotkeyController())
 
 
 class TestTurnoDeVoz(unittest.IsolatedAsyncioTestCase):
@@ -295,6 +324,175 @@ class TestTurnoDeVoz(unittest.IsolatedAsyncioTestCase):
         asis._voice_replay_tries = 1
         await asis._end_turn(_SesionFalsa(), reason="RESPONSE_REJECTED")
         self.assertEqual(0, asis._voice_replay_tries)
+
+    # -- cierre por silencio (regresión del 30/09) ------------------------
+    async def test_en_toggle_el_turno_se_cierra_al_callarse(self) -> None:
+        """Pulsas, hablas, te callas: el turno se envía SIN segunda pulsación.
+
+        Regresión del bug reportado: con ``voice_manual_vad`` el segmentador de
+        silencio estaba desactivado siempre, así que en modo alterno el turno
+        solo lo cerraba la segunda pulsación. El usuario pulsaba una vez, veía
+        el micrófono abierto, hablaba y no recibía respuesta nunca; el HUD
+        además decía "suelta el botón", que en modo alterno no hace nada.
+        """
+        sesion = _SesionFalsa()
+        asis = self._preparar(sesion)
+        # Umbral corto para que la prueba no tarde 2,5 s.
+        asis._settings.voice_toggle_silence = 0.1
+        # Turno abierto por el usuario (pulsación), no escucha continua.
+        asis._voice_toggle = True
+        asis._voice_event.set()
+        with mock.patch.object(la, "MicrophoneCapture", _MicroQueSeCalla):
+            tarea = asyncio.create_task(asis._voice_loop(sesion, None, None))
+            try:
+                # Nadie toca ``_voice_event``: el cierre tiene que venir solo.
+                # ``audio_stream_end`` es lo que entrega el turno al modelo; el
+                # ``activity_end`` llega después, al salir del bucle, porque el
+                # micrófono sigue abierto escuchando la siguiente frase.
+                await self._esperar(
+                    lambda: sesion.cierres == 1,
+                    "el turno NO se envió solo al callarse: hace falta una "
+                    "segunda pulsación para que salga algo",
+                    timeout=8.0,
+                )
+            finally:
+                asis.quit_event.set()
+                tarea.cancel()
+                with contextlib.suppress(BaseException):
+                    await tarea
+        self.assertTrue(asis._awaiting_turn, "el turno no quedó esperando respuesta")
+        self.assertIsNotNone(asis._voice_replay)
+
+    async def test_en_escucha_continua_el_silencio_no_cierra(self) -> None:
+        """Escucha continua + VAD manual: hablar indefinido sigue siendo legal.
+
+        El auto-cierre es solo para turnos que abrió una pulsación. Si se
+        extendiera a la escucha continua, una pausa al pensar cortaría la frase
+        a mitad, que es justo lo que el VAD manual existe para evitar.
+        """
+        sesion = _SesionFalsa()
+        asis = self._preparar(sesion)
+        asis._settings.voice_toggle_silence = 0.1
+        asis._voice_toggle = False  # escucha continua
+        asis._voice_event.set()
+        with mock.patch.object(la, "MicrophoneCapture", _MicroQueSeCalla):
+            tarea = asyncio.create_task(asis._voice_loop(sesion, None, None))
+            try:
+                await self._esperar(lambda: sesion.audio > 0, "no llegó audio")
+                # Silencio prolongado: el turno debe seguir abierto.
+                await asyncio.sleep(0.6)
+                # La ventana se abre al empezar el turno; lo que no debe
+                # aparecer es el 'end' que cerraría la frase.
+                self.assertEqual(
+                    0,
+                    sesion.actividad.count("end"),
+                    "la escucha continua se cerró sola: una pausa al pensar "
+                    "cortaría la frase",
+                )
+                self.assertEqual(0, sesion.cierres)
+                self.assertTrue(asis._voice_event.is_set())
+            finally:
+                asis.quit_event.set()
+                tarea.cancel()
+                with contextlib.suppress(BaseException):
+                    await tarea
+
+    async def test_el_silencio_por_defecto_no_es_tan_brusco(self) -> None:
+        """El umbral de toggle (2,5 s) es bastante más ancho que el de 1,0 s.
+
+        El segmentador de 1 s del VAD automático se descartó porque cortaba
+        frases a mitad al pensar. El valor por defecto de toggle no puede ser
+        ese: tiene que dar margen a una pausa natural.
+        """
+        ajustes = Settings()
+        self.assertTrue(ajustes.voice_manual_vad)
+        self.assertGreater(ajustes.voice_toggle_silence, 1.5)
+        self.assertLess(ajustes.voice_toggle_silence, 6.0)
+
+    async def test_silencio_cero_devuelve_el_dos_pulsaciones(self) -> None:
+        """``voice_toggle_silence = 0`` deja el cierre solo en la 2ª pulsación."""
+        sesion = _SesionFalsa()
+        asis = self._preparar(sesion)
+        asis._settings.voice_toggle_silence = 0.0
+        asis._voice_toggle = True
+        asis._voice_event.set()
+        with mock.patch.object(la, "MicrophoneCapture", _MicroQueSeCalla):
+            tarea = asyncio.create_task(asis._voice_loop(sesion, None, None))
+            try:
+                await self._esperar(lambda: sesion.audio > 0, "no llegó audio")
+                await asyncio.sleep(0.6)
+                self.assertEqual(
+                    0,
+                    sesion.actividad.count("end"),
+                    "con silencio=0 el turno NO debe cerrarse solo",
+                )
+                self.assertEqual(0, sesion.cierres)
+                self.assertTrue(asis._voice_event.is_set())
+            finally:
+                asis.quit_event.set()
+                tarea.cancel()
+                with contextlib.suppress(BaseException):
+                    await tarea
+
+
+class TestAvisoDelMicrofono(unittest.TestCase):
+    """El HUD tiene que decir qué hacer para cerrar el turno.
+
+    Importa ``overlay``, que arrastra PyQt6, así que ``QT_QPA_PLATFORM`` se pone
+    a ``offscreen`` antes de nada: sin ventana, sin tocar la pantalla.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import os
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        import overlay  # noqa: PLC0415 - necesita el env de arriba primero
+
+        cls._hint = staticmethod(overlay.OverlayHud._voice_hint)
+
+    @staticmethod
+    def _settings(modo: str, silencio: float) -> Settings:
+        s = Settings()
+        s.mute_mode = modo
+        s.voice_toggle_silence = silencio
+        return s
+
+    def _texto(self, modo: str, silencio: float) -> str:
+        return self._hint(type("X", (), {"_settings": self._settings(modo, silencio)})())
+
+    def test_en_alterno_no_dice_suelta_el_boton(self) -> None:
+        """En modo alterno, soltar NO cierra el turno: el aviso era falso.
+
+        Era la causa de la confusión del usuario: el HUD ponía "suelta el
+        botón para responder" y, si pulsaba una vez y esperaba, no pasaba nada
+        sin explicación. En alterno el botón se suelta sin efecto.
+        """
+        texto = self._texto("toggle", 2.5)
+        self.assertNotIn(
+            "suelta el bot",
+            texto.lower(),
+            "en modo alterno soltar la tecla no cierra el turno",
+        )
+        self.assertIn("Escuchando", texto)
+
+    def test_en_alterno_explica_como_se_manda(self) -> None:
+        """Con auto-cierre: dice que se manda sola y cuánto tarda."""
+        texto = self._texto("toggle", 2.5)
+        self.assertIn("2.5", texto)
+        self.assertIn("pulsa", texto.lower())
+
+    def test_sin_auto_cierre_pide_la_segunda_pulsacion(self) -> None:
+        """Con ``voice_toggle_silence = 0`` solo cierra la 2ª pulsación."""
+        texto = self._texto("toggle", 0.0)
+        self.assertIn("pulsa de nuevo", texto.lower())
+        # Sin auto-cierre no debe prometer que se manda sola.
+        self.assertNotIn("sola", texto.lower())
+
+    def test_en_push_to_talk_sigue_diciendo_suelta(self) -> None:
+        """En PTT soltar sí cierra: el aviso original era correcto ahí."""
+        texto = self._texto("push_to_talk", 2.5)
+        self.assertIn("suelta", texto.lower())
 
 
 if __name__ == "__main__":
