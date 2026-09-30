@@ -302,6 +302,50 @@ _CLIP_READ_RE = re.compile(
 _CLIP_COPY_RE = re.compile(r"(?i)\b(?:copia|copiame)\s+(.+?)\s*$")
 _CLIP_MEH_FIRST = ("de", "la", "el", "los", "las", "un", "una", "mi", "tu")
 
+# --- Órdenes sobre la propia memoria (Fase 2) -------------------------------
+# Tres órdenes que antes no existían porque una lista plana no podía
+# contestarlas: olvidar un tema (no todo), decir qué recuerda sobre algo, y de
+# dónde sale un dato. El orden dentro de cada una es importante: primero la
+# forma larga y después la corta, y "todo" queda EXCLUIDO a propósito porque eso
+# lo lleva el reset de toda la vida.
+_PROCEDENCIA_RE = re.compile(
+    r"(?i)\b(?:por\s+qu[eé]\s+(?:me\s+)?(?:dices|dijiste|sabes|crees)|"
+    r"de\s+d[oó]nde\s+(?:sabes|saca|lo\s+sacas)|seg[uú]n\s+qu[eé]|"
+    r"en\s+qu[eé]\s+te\s+bases)\s*(?:tienes\s+|esa\s+|esto\s+|lo\s+que\s+me\s+dijiste\s+de\s+)?(.+)?$"
+)
+_RECUERDA_RE = re.compile(
+    r"(?i)\b(?:qu[eé]\s+(?:recuerdas|sabes|te\s+acuerdas)|de\s+qu[eé]\s+sabes|"
+    r"te\s+acuerdas\s+de)\s*(?:de|sobre|acerca\s+de)?\s*(.+)?$"
+)
+# ``(?!todo\b)`` es lo que separa este forget del de toda la vida: "olvida todo"
+# tiene que seguir llegando al reset, no a interpretarse como borrar lo que
+# cuelgue de la palabra "todo".
+_FORGET_TOPIC_RE = re.compile(
+    r"(?i)\b(?:olvida|olv[íi]date\s+de|borra|elimina|descarta)\s+"
+    r"(?!todo\b)(?:lo\s+(?:de|sobre)|el\s+(?:tema|asunto)|mi\s+|tus\s+|"
+    r"todo\s+lo\s+(?:de|sobre)\s+|los\s+recuerdos\s+(?:de|sobre)\s+)?(.+?)\s*$"
+)
+
+
+def _habla_de(texto: str, tema: str) -> bool:
+    """¿Este texto habla de este tema?
+
+    Solapamiento de palabras de contenido, no la cadena entera: "olvida lo de
+    Python" tiene que tocar los recuerdos que mencionan Python aunque la frase
+    no sea idéntica. Se apoya en el tokenizador de ``memory.base``, que ya
+    quita acentos y palabras vacías, así que el criterio es el mismo que usa el
+    grafo para puntuar.
+    """
+    try:
+        from memory.base import normalizar, palabras
+    except Exception:  # noqa: BLE001 - sin memoria, no se filtra nada
+        return False
+    terminos = palabras(tema, min_len=3)
+    if not terminos:
+        return False
+    return bool(terminos & palabras(texto, min_len=3))
+
+
 # Umbral RMS mínimo (sobre muestras PCM 16 bits) para no reenviar silencio
 # ambiente: los modelos *-live-preview agotan cuota con reenvíos continuos.
 # El gate real es adaptativo: se persigue el suelo de ruido del micrófono y se
@@ -1195,7 +1239,10 @@ class LiveAssistant:
         # en la memoria de trabajo para poder aprender de cómo acabó. Sin esto,
         # el registro de turnos se quedaba siempre vacío.
         self._pregunta_turno: str = ""
-        # Métricas de latencia por turno (E4): marca del inicio del turno y del
+        # La pregunta del turno YA cerrado. Vive aparte porque ``_pregunta_turno``
+        # se vacía al cerrar: sin esto, detectar que el usuario está corrigiendo
+        # el turno anterior no tendría con qué compararse.
+        self._ultima_pregunta: str = ""        # Métricas de latencia por turno (E4): marca del inicio del turno y del
         # primer contenido de respuesta recibido. Se miden con ``time.monotonic``
         # y se reportan por log en ``_end_turn``.
         self._turn_begin: Optional[float] = None
@@ -1601,6 +1648,183 @@ class LiveAssistant:
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("No se pudo indexar el recuerdo: %s", exc)
+
+    def _detectar_disputa(self, texto: str) -> str:
+        """¿Lo que el usuario dice ahora choca con un recuerdo guardado?
+
+        Se llama ANTES de enviar el turno, y esa es toda la razón de que sea un
+        método aparte y no un efecto secundario de ``_remember``: el recuerdo se
+        guarda DESPUÉS de ``send_client_content``, así que si se detectara ahí la
+        nota llegaría un turno tarde, que es justo cuando ya no sirve de nada.
+
+        Devuelve la nota para el prompt, o ``""`` si no hay choque. Nunca lanza
+        y nunca elige ganador: solo levanta la bandera ``contested`` y le pide al
+        modelo que pregunte.
+        """
+        try:
+            from memory.work_memory import detectar_chocque
+
+            return detectar_chocque(self._memoria_indice, texto)
+        except Exception as exc:  # noqa: BLE001 - la memoria no tumba el turno
+            logger.debug("No se pudo revisar contradicciones: %s", exc)
+            return ""
+
+    def _marcar_correccion(self, texto: str) -> None:
+        """Si el usuario rectifica, el turno anterior queda como ``corrected``.
+
+        Sin esto el resultado "corrected" de la reflexión no se producía nunca:
+        el motor solo sabía registrar "útil" o "callejón sin salida", y una
+        corrección no es ninguna de las dos cosas. Es además la señal más
+        valiosa de las tres: es el único caso en que el usuario dice
+        explícitamente que la app se equivocó.
+        """
+        anterior = (self._ultima_pregunta or "").strip()
+        if not anterior:
+            return
+        try:
+            from memory.work_memory import es_correccion
+
+            if not es_correccion(texto):
+                return
+            self.registrar_giro(anterior, "corrected", correccion=texto[:200])
+            logger.info("Memoria: el usuario corrigió el turno anterior.")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("No se pudo registrar la corrección: %s", exc)
+
+    def _accion_memoria(self, text: str) -> Optional[str]:
+        """Órdenes que hablan de la propia memoria.
+
+        Tres cosas que la memoria en grafo sabe contestar y antes no se podían
+        ni intentar: olvidar un tema concreto (no todo), decir qué recuerda
+        sobre algo, y de dónde salió un dato.
+
+        Va ANTES que el resto de integraciones y devuelve ``None`` en cuanto ve
+        que la orden era de otro sitio, para que "olvida el temporizador" siga
+        canceling el temporizador y no borre recuerdos del temporizador.
+        """
+        t = (text or "").strip()
+        low = t.lower()
+        if not t:
+            return None
+
+        # --- De dónde sale un dato -------------------------------------------
+        m = _PROCEDENCIA_RE.search(low)
+        if m:
+            return self._nota_procedencia((m.group(1) or "").strip())
+
+        # --- Qué recuerdas de algo -------------------------------------------
+        m = _RECUERDA_RE.search(low)
+        if m:
+            return self._nota_recuerda((m.group(1) or "").strip())
+
+        # --- Olvidar un tema (no todo) ---------------------------------------
+        m = _FORGET_TOPIC_RE.search(low)
+        if m:
+            # Si la orden mentions algo que es integración local, no es memoria.
+            if (
+                _TIMER_CANCEL_RE.search(t)
+                or _TIMER_LIST_RE.search(t)
+                or "volumen" in low
+                or _CLIP_COPY_RE.search(t)
+                or _CLIP_READ_RE.search(low)
+            ):
+                return None
+            return self._olvidar_tema((m.group(1) or "").strip())
+        return None
+
+    def _nota_procedencia(self, tema: str) -> str:
+        """Contesta "de dónde sabes eso" con la procedencia, sin inventar nada."""
+        indice = self._memoria_indice
+        if indice is None or not tema:
+            return (
+                "(Memoria: ahora mismo solo hay memoria plana, sin procedencia "
+                "por recuerdo. Se guarda todo lo que dices en la conversación, "
+                "pero no hay forma de decir de qué turno salió cada cosa.)"
+            )
+        try:
+            encontradas = indice.buscar(tema, limite=4)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("No se pudo buscar en la memoria: %s", exc)
+            return ""
+        if not encontradas:
+            return f"(Memoria: no hay ningún recuerdo guardado sobre «{tema}».)"
+        partes = []
+        for e in encontradas:
+            fuente = "lo dijiste tú" if e.role == "user" else "te lo dije yo"
+            marca = ", y lo has corregido después" if e.contested else ""
+            partes.append(
+                f"«{e.text[:160]}» ({fuente} el {e.created_at[:10]}{marca})"
+            )
+        return (
+            "(Procedencia de lo que recuerdo sobre "
+            f"«{tema}»: " + "; ".join(partes) + ".)"
+        )
+
+    def _nota_recuerda(self, tema: str) -> str:
+        """Contesta "qué recuerdas de X" con lo que hay, marcado y sin rellenar."""
+        if not tema:
+            return "(Dime de qué quieres que te diga qué recuerdo.)"
+        indice = self._memoria_indice
+        if indice is None:
+            return (
+                "(Memoria: tengo la conversación reciente y los resúmenes largos, "
+                "pero sin índice por temas. Guarda lo que digamos y úsalo a partir "
+                "de ahora.)"
+            )
+        try:
+            encontradas = indice.buscar(tema, limite=6)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("No se pudo buscar en la memoria: %s", exc)
+            return ""
+        if not encontradas:
+            return f"(Memoria: no tengo nada guardado sobre «{tema}».)"
+        lineas = []
+        for e in encontradas:
+            quien = "dijiste" if e.role == "user" else "dije"
+            sufijo = " (esto lo corregiste después, está en disputa)" if e.contested else ""
+            lineas.append(f"- {quien}: {e.text[:200]}{sufijo}")
+        return (
+            f"(Lo que recuerdo sobre «{tema}», con la fuente de cada cosa:\n"
+            + "\n".join(lineas)
+            + ")"
+        )
+
+    def _olvidar_tema(self, tema: str) -> str:
+        """Olvida lo que hable de ``tema``. Es el "olvida" fino, no el de todo."""
+        if not tema or len(tema) < 2:
+            return "(Dime qué tema quieres que olvide.)"
+        borrados: list[str] = []
+        indice = self._memoria_indice
+        if indice is not None:
+            try:
+                borrados = indice.forget_matching(tema, limite=12)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("No se pudo olvidar el tema en el grafo: %s", exc)
+        # La memoria plana es la fuente de verdad del turno, así que también se
+        # filtra aquí. Sin esto, lo borrado del grafo volvería en el bloque plano.
+        antes = len(self._memory) + len(self._permanent)
+        self._memory = [e for e in self._memory if not _habla_de(e.get("text", ""), tema)]
+        self._permanent = [
+            e for e in self._permanent if not _habla_de(e, tema)
+        ]
+        if antes != len(self._memory) + len(self._permanent):
+            self._save_memory()
+        plano = antes - (len(self._memory) + len(self._permanent))
+        total = len(borrados) + plano
+        if self._memoria_trabajo is not None:
+            try:
+                self._memoria_trabajo.forget(tema)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("No se pudo limpiar la memoria de trabajo: %s", exc)
+        if not total:
+            return f"(Memoria: no tenía nada guardado sobre «{tema}», así que no hay nada que olvidar.)"
+        muestra = "; ".join(t[:80] for t in (borrados or [])[:3])
+        extra = f" Por ejemplo: {muestra}." if muestra else ""
+        logger.info("Memoria: olvidado el tema %r (%d recuerdo(s)).", tema, total)
+        return (
+            f"(Memoria: olvidado «{tema}»: {total} recuerdo(s) borrados.{extra} "
+            "No vuelvas a sacarlo salvo que el usuario vuelva a hablar de ello.)"
+        )
 
     def _log_script(self, role: str, text: str) -> None:
         """Apéndice el guión de la conversación a un archivo en ``data_dir`` (E9).
@@ -2343,6 +2567,9 @@ class LiveAssistant:
             self._outdone_ts = None
             # La pregunta del turno, para el registro de la Fase 2.
             self._pregunta_turno = text
+            # Fase 2: si esto es una rectificación, el turno anterior queda
+            # registrado como ``corrected`` y entra en la reflexión.
+            self._marcar_correccion(text)
 
             # Marca de tiempo mínima: el modelo responde la hora con el dato
             # real en vez de inventarla.
@@ -2524,6 +2751,19 @@ class LiveAssistant:
                             )
                 except Exception as exc:  # noqa: BLE001 - es contexto, nunca crítico
                     logger.debug("No se pudo añadir la memoria del turno: %s", exc)
+                # Aviso de contradicción (Fase 2). Va ANTES de la búsqueda web
+                # porque manda más que ella: si el usuario acaba de corregir un
+                # dato que el modelo iba a usar, ninguna búsqueda de internet lo
+                # arregla. Solo se comprueba en órdenes de verdad, no en las de
+                # memoria ("olvida X" no puede contradecir nada).
+                if not is_reset and local_note is None:
+                    try:
+                        aviso_disputa = self._detectar_disputa(text)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("No se pudo revisar la memoria del turno: %s", exc)
+                        aviso_disputa = ""
+                    if aviso_disputa:
+                        parts.insert(-1, types.Part(text=aviso_disputa))
                 query = explicit_query
                 if query is None and classify_fut is not None:
                     try:
@@ -4615,6 +4855,14 @@ class LiveAssistant:
         if not t:
             return None
 
+        # --- Memoria (Fase 2) ------------------------------------------------
+        # Va primero porque habla de la propia conversación, pero devuelve None
+        # en cuanto la orden es de otra integración, así que "olvida el
+        # temporizador" sigue cancelando el temporizador.
+        nota_memoria = self._accion_memoria(t)
+        if nota_memoria is not None:
+            return nota_memoria
+
         # --- Lista de temporizadores activos --------------------------------
         if _TIMER_LIST_RE.search(t):
             pend = [d for d in self._timers if not d["done"]]
@@ -5619,6 +5867,8 @@ class LiveAssistant:
             self._remember("user", text)
             # La pregunta del turno, para el registro de la Fase 2.
             self._pregunta_turno = text
+            # Fase 2: una rectificación deja el turno anterior como ``corrected``.
+            self._marcar_correccion(text)
             # Nuevo turno hablado: rondas de autocompletado disponibles de nuevo.
             self._cont_remaining = _CONTINUE_MAX_ROUNDS
             # Integración local POR VOZ (temporizador, volumen, portapapeles):
@@ -5627,8 +5877,28 @@ class LiveAssistant:
             local_note = self._local_action(text)
             if local_note:
                 self._safe_call(self.on_meta, local_note)
-            elif self._settings.web_search_enabled:
-                self._schedule_voice_web(session, text)
+                # Con una integración local no hay búsqueda que hacer ni datos que
+                # contradecir: la orden ya se resolvió sin modelo.
+            else:
+                # Aviso de contradicción (Fase 2), pero por voz NO se interrumpe
+                # la respuesta para inyectarlo: el barge-in con `_INTERRUPT_TEXT`
+                # deja muda la sesión (ver la nota de `cancel`), que es un precio
+                # altísimo por una frase. Se marca en disputa, se le dice al
+                # usuario en el HUD, y la sección `[En disputa]` del system
+                # prompt hace que pregunte en cuanto haya una conexión.
+                try:
+                    aviso_disputa = self._detectar_disputa(text)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("No se pudo revisar la memoria del turno: %s", exc)
+                    aviso_disputa = ""
+                if aviso_disputa:
+                    self._safe_call(
+                        self.on_meta,
+                        "(Memoria) Eso contradice algo que tenías guardado; "
+                        "te lo pregunto en cuanto pueda hablar.",
+                    )
+                if self._settings.web_search_enabled:
+                    self._schedule_voice_web(session, text)
 
     async def _end_turn(self, session, reason=None) -> None:
         """Cierra el turno de respuesta en curso y decide si continuar.
@@ -5710,6 +5980,7 @@ class LiveAssistant:
                     "dead_end" if rejected else "useful",
                 )
             self._pregunta_turno = ""
+            self._ultima_pregunta = pregunta_turno
             # Los contadores de refuerzo del grafo se aplazaron durante el turno
             # (escribir a disco en cada recuperación costaba un cuarto de
             # frame). Aquí, al terminar el turno, se vuelcan.

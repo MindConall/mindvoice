@@ -1,0 +1,30 @@
+{
+  "fase": 2,
+  "medido_con": "Grafo de 1424 nodos / 3.05 MB, el tamaño real de la memoria del usuario. 300 repeticiones por caso, Python 3.13, sin red.",
+  "nota": "Las cifras de 'antes' son las de la primera implementación de esta misma fase. Se miden porque un barrido sin tope y un 'marcar disputa' que escribe a disco son fallos que los tests de correctitud no ven: dan el resultado correcto y cuestan casi medio segundo.",
+  "barrido_de_contradicciones_al_arranque_ms": {
+    "antes": 2825.6,
+    "antes_por_que": "El tope de comparaciones se comprobaba DESPUES de comparar un grupo entero. La etiqueta mas poblada tiene mas de 300 recuerdos, o sea 45 000 parejas, y el tope se activaba cuando ya estaban hechas. Ademas cada pareja recalculaba cuatro normalizaciones y dos tokenizados.",
+    "despues": 35.7,
+    "despues_como": "Tope duro comprobado en cada iteracion + una firma por recuerdo en vez de una por pareja"
+  },
+  "chequeo_de_choque_en_el_turno_ms": {
+    "antes": 345.6,
+    "antes_por_que": "marcar_disputa reescribia el JSON entero del grafo (3 MB) por poner una bandera booleana, en el camino critico de la voz",
+    "despues_media": 1.7,
+    "despues_max": 6.3,
+    "despues_como": "marcar_disputa no escribe: la bandera sale a disco al cerrar el turno (_vaciar_pendientes). El barrido usa marcar_disputas, que escribe una vez."
+  },
+  "chequeo_sin_choque_ms": {
+    "media": 1.5,
+    "max": 9.2
+  },
+  "veredicto": "35,7 ms de arranque es invisible; 1,7 ms por turno es despreciable junto a la latencia de red de un turno de voz. Las dos cifras bajan mas de 70x respecto a la primera version.",
+  "pruebas": {
+    "ficheros": 9,
+    "tests": 230,
+    "pasan": 229,
+    "fallan": 1,
+    "fallo_conocido": "test_ui_tokens.py::TestRendimientoAnimaciones::test_diez_animaciones_no_se_acumulan_en_el_bucle (AssertionError: 1 != 0). Es de la Fase 3, anterior a este trabajo y sin relacion con el."
+  }
+}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 
 from .base import (
@@ -19,6 +20,7 @@ from .base import (
     MemoryEntry,
     ahora_iso,
     normalizar,
+    palabras,
     recortar,
 )
 
@@ -31,6 +33,9 @@ MAX_PERMANENT = 30
 PERMANENT_MAX_CHARS = 600
 BRIEF_HEADING = "[Breve (conversación reciente)]"
 PERMANENT_HEADING = "[A largo plazo (hechos persistentes resumidos)]"
+# Mismo corte por cobertura que el grafo, para que "olvida X" borre lo mismo
+# tenga o no tenga índice. Ver ``graph_backend._UMBRAL_OLVIDAR``.
+UMBRAL_OLVIDAR = 0.5
 
 
 class FlatBackend(MemoryBackend):
@@ -211,6 +216,67 @@ class FlatBackend(MemoryBackend):
             ensure_ascii=False,
             indent=2,
         )
+
+    # -------------------------------------------------------------- auditoría
+    # El plano no tiene grafo, así que "buscar" aquí es coincidencia de
+    # palabras. Es peor que en el grafo y a propósito: cuando el grafo no está
+    # disponible la app tiene que seguir siendo útil, aunque tenga menos
+    # precisión. Se dice en el log para que la diferencia sea visible.
+    def _similitud(self, entrada: MemoryEntry, terminos: set[str]) -> float:
+        if not terminos:
+            return 0.0
+        comunes = terminos & palabras(entrada.text)
+        if not comunes:
+            return 0.0
+        return len(comunes) / math.sqrt(max(8.0, len(palabras(entrada.text)) * 4.0))
+
+    def _cobertura(self, entrada: MemoryEntry, terminos: set[str]) -> float:
+        """Proporción de términos del tema que aparecen en el recuerdo.
+
+        Distinto de ``_similitud`` por el mismo motivo que en el grafo: la
+        similitud normaliza por la longitud del texto y por eso "el perro"
+        puntúa bajísimo sobre un recuerdo corto, cuando para borrar es justo al
+        revés. Aquí solo importa si el recuerdo habla del tema.
+        """
+        if not terminos:
+            return 0.0
+        comunes = terminos & palabras(entrada.text)
+        if not comunes:
+            return 0.0
+        return len(comunes) / len(terminos)
+
+    def buscar(self, texto: str, limite: int = 8) -> list[MemoryEntry]:
+        terminos = palabras(texto) if (texto or "").strip() else set()
+        if not terminos:
+            return []
+        puntuados = [
+            (self._similitud(e, terminos), i, e)
+            for i, e in enumerate(self._permanent + self._brief)
+        ]
+        puntuados = [p for p in puntuados if p[0] > 0.0]
+        puntuados.sort(key=lambda p: (-p[0], -p[1]))
+        return [e for _, _, e in puntuados[:limite]]
+
+    def forget_matching(self, texto: str, limite: int = 8) -> list[str]:
+        terminos = palabras(texto) if (texto or "").strip() else set()
+        if not terminos:
+            return []
+        victimas = [
+            e
+            for e in (self._brief + self._permanent)
+            if self._cobertura(e, terminos) >= UMBRAL_OLVIDAR
+        ]
+        if not victimas:
+            return []
+        ids = {e.id for e in victimas}
+        self._brief = [e for e in self._brief if e.id not in ids]
+        self._permanent = [e for e in self._permanent if e.id not in ids]
+        self._guardar_breve()
+        self._guardar_permanente()
+        logger.info(
+            "Memoria plana: %d recuerdo(s) olvidado(s) por tema.", len(victimas)
+        )
+        return [e.text for e in victimas]
 
     # -------------------------------------------------------------- lectura
     def retrieve(

@@ -455,6 +455,114 @@ class TestGrafoVsPlano(BaseTemporal):
         self.assertEqual(len(plano.retrieve(pregunta, limite=1)), 1)
 
 
+class TestAuditoria(BaseTemporal):
+    """``buscar`` / ``forget_matching`` / ``en_disputa`` en los dos backends.
+
+    La misma pregunta tiene que dar la misma respuesta con y sin grafo. No con
+    la misma precisión —el grafo busca por etiquetas y el plano por palabras—
+    pero sí con el mismo contrato, que es lo que permite que el motor no sepa
+    cuál tiene delante.
+    """
+
+    RECUERDOS = (
+        "Ana tiene un perro llamado Nube",
+        "el proyecto de la tienda va con Python",
+        "Ana swims every morning at six",
+        "el coche de Ana es un Renault Clio",
+    )
+
+    def _plano(self) -> FlatBackend:
+        self._escribir(self.brief, [{"role": "user", "text": t} for t in self.RECUERDOS])
+        return FlatBackend(self.brief, self.perman)
+
+    def _grafo(self) -> GraphBackend:
+        g = GraphBackend(self.tmp)
+        for t in self.RECUERDOS:
+            g.remember(t)
+        return g
+
+    def test_buscar_encuentra_lo_relevante_en_ambos(self) -> None:
+        for backend in (self._plano(), self._grafo()):
+            with self.subTest(backend=backend.nombre):
+                encontrados = backend.buscar("perro de Ana", limite=3)
+                self.assertTrue(encontrados)
+                self.assertIn("perro", encontrados[0].text)
+
+    def test_buscar_sin_coincidencia_devuelve_vacio(self) -> None:
+        for backend in (self._plano(), self._grafo()):
+            with self.subTest(backend=backend.nombre):
+                self.assertEqual(backend.buscar("zafiro watch", limite=3), [])
+
+    def test_buscar_texto_vacio_no_rompe(self) -> None:
+        for backend in (self._plano(), self._grafo()):
+            with self.subTest(backend=backend.nombre):
+                self.assertEqual(backend.buscar("", limite=3), [])
+                self.assertEqual(backend.buscar("   ", limite=3), [])
+
+    def test_olvidar_un_tema_solo_borra_ese_tema(self) -> None:
+        """El "olvida" fino: se va el perro y se queda el proyecto."""
+        for backend in (self._plano(), self._grafo()):
+            with self.subTest(backend=backend.nombre):
+                borrados = backend.forget_matching("el perro", limite=12)
+                self.assertTrue(borrados)
+                self.assertTrue(any("perro" in t for t in borrados))
+                lo_que_queda = " ".join(e.text for e in backend.buscar("proyecto Python", limite=5))
+                self.assertIn("Python", lo_que_queda)
+
+    def test_olvidar_lo_que_no_hay_no_hace_nada(self) -> None:
+        for backend in (self._plano(), self._grafo()):
+            with self.subTest(backend=backend.nombre):
+                self.assertEqual(backend.forget_matching("avión depapado", limite=5), [])
+
+    def test_olvidar_deja_la_memoria_usable(self) -> None:
+        """No basta con que borre: tiene que seguir contestando."""
+        for backend in (self._plano(), self._grafo()):
+            with self.subTest(backend=backend.nombre):
+                backend.forget_matching("el perro", limite=12)
+                self.assertTrue(backend.block("hola"))
+
+    def test_el_grafo_marca_y_lista_las_disputas(self) -> None:
+        g = self._grafo()
+        self.assertEqual(g.en_disputa(), [])
+        nodos = [n for n in g._grafo["nodes"] if n.get("kind") == "brief"]
+        g.marcar_disputa(nodos[0]["id"], True)
+        self.assertEqual(len(g.en_disputa()), 1)
+        self.assertEqual(g.en_disputa()[0].contested, True)
+
+    def test_el_plano_no_tiene_disputas_nunca(self) -> None:
+        """El plano no sabe de disputas: contesta vacío en vez de inventar estado."""
+        self.assertEqual(self._plano().en_disputa(), [])
+
+    def test_el_bloque_del_grafo_dice_de_donde_sale_cada_dato(self) -> None:
+        g = self._grafo()
+        bloque = g.block("perro de Ana")
+        self.assertIn("tú lo dijiste", bloque)
+
+    def test_el_bloque_saca_los_disputos_a_su_seccion(self) -> None:
+        g = self._grafo()
+        nodos = [n for n in g._grafo["nodes"] if n.get("kind") == "brief"]
+        g.marcar_disputa(nodos[0]["id"], True)
+        bloque = g.block("perro de Ana")
+        self.assertIn("En disputa", bloque)
+        self.assertIn("pregunta al usuario", bloque)
+
+    def test_un_disputado_no_aparece_dos_veces(self) -> None:
+        """Repetir la misma línea con dos instrucciones hace que gane la primera.
+
+        La sección de disputa lleva "no elijas una", y la lista normal lleva el
+        dato seco. Si el recuerdo sale en las dos, el modelo lee dos veces lo
+        mismo y decide con la instrucción que se encuentre primero.
+        """
+        g = self._grafo()
+        nodos = [n for n in g._grafo["nodes"] if n.get("kind") == "brief"]
+        g.marcar_disputa(nodos[0]["id"], True)
+        bloque = g.block("perro de Ana")
+        self.assertEqual(bloque.count("perro llamado Nube"), 1)
+        # Y lo que no está en disputa sigue apareciendo con su procedencia.
+        self.assertIn("Python", bloque)
+        self.assertIn("tú lo dijiste", bloque)
+
+
 class TestRendimientoDeRecuperacion(unittest.TestCase):
     """Recuperar por pregunta tiene que ser barato, no solo correcto.
 

@@ -26,6 +26,19 @@ EXTRACTED = "EXTRACTED"
 INFERRED = "INFERRED"
 CONTESTED = "contested"
 
+# Marcas de procedencia que se añaden al final de la línea en la nota del prompt.
+# La Fase 2 lo pide explícitamente ("explica de dónde sacas un recuerdo"): sin
+# esto el modelo recite un dato sin poder decir de dónde lo sacó, y el usuario
+# no puede ni auditarlo. Son cortas a propósito: cuestan tokens en cada turno y
+# el bloque entero se mide contra el presupuesto.
+MARCA_DICHO = "· tú lo dijiste"
+MARCA_INFERIDO = "· deducido"
+
+# Encabezado de la sección de memoria en disputa. El modelo recibe aquí la orden
+# de PREGUNTAR en vez de asumir, que es lo que convierte una contradicción
+# detectada en un comportamiento visible y no en un silencio.
+DISPUTA_HEADING = "[En disputa: hay recuerdos que se contradicen]"
+
 # Variables de entorno que fuerzan un backend sin tocar código.
 ENV_BACKEND = "MINDVOICE_MEMORY"
 ENV_GRAPH_DIR = "MINDVOICE_MEMORY_GRAPH"
@@ -233,6 +246,30 @@ class MemoryBackend(ABC):
         desde fuera.
         """
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Auditoría (Fase 2). No son abstractas a propósito: son la vía de las
+    # preguntas que la app tiene que poder contestar ("¿qué recuerdas de X?",
+    # "¿de dónde sabes eso?", "olvida lo de X"), y un backend que no sepa
+    # devolver una lista vacía no puede impedir que se le pregunte. Sin esto,
+    # con la memoria en plano esas órdenes no tendrían respuesta y el motor
+    # rompería con AttributeError en mitad de la voz.
+    # ------------------------------------------------------------------
+    def buscar(self, texto: str, limite: int = 8) -> list[MemoryEntry]:
+        """Recuerdos que más se parecen a ``texto``, de más a menos parecido."""
+        return []
+
+    def forget_matching(self, texto: str, limite: int = 8) -> list[str]:
+        """Olvida lo que hable de ``texto``. Devuelve los textos borrados.
+
+        Es el "olvida" fino: el de toda la vida borra todo de golpe, y con la
+        memoria en grafo hace falta poder quitar un tema sin perder el resto.
+        """
+        return []
+
+    def en_disputa(self) -> list[MemoryEntry]:
+        """Recuerdos que el usuario contradijo y que siguen sin resolverse."""
+        return []
 
 
 def backend_forzado() -> str | None:

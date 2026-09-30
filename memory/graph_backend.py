@@ -31,8 +31,11 @@ from datetime import datetime, timedelta, timezone
 
 from .base import (
     BLOCK_BUDGET,
+    DISPUTA_HEADING,
     EXTRACTED,
     INFERRED,
+    MARCA_DICHO,
+    MARCA_INFERIDO,
     MemoryBackend,
     MemoryEntry,
     antiguedad_dias,
@@ -65,6 +68,10 @@ MINIMO_SEGURIDAD = 3
 # Un recuerdo en disputa se hunde, pero no desaparece: puede que la razón la
 # tenga el usuario.
 _PENALIZACION_DISPUTA = 0.45
+# Cobertura mínima del tema para que "olvida el perro" borre lo del perro. Con
+# dos o más términos hace falta que aparezcan al menos la mitad, para que
+# "olvida Python y Rust" no se lleve por delante la memoria de Python.
+_UMBRAL_OLVIDAR = 0.5
 
 
 def _id_para(texto: str, secuencia: int) -> str:
@@ -80,6 +87,32 @@ def _salvar_atomico(ruta: str, datos: dict) -> None:
     with open(temporal, "w", encoding="utf-8") as fh:
         json.dump(datos, fh, ensure_ascii=False, indent=1)
     os.replace(temporal, ruta)
+
+
+def _marca(entrada: MemoryEntry) -> str:
+    """La procedencia de un recuerdo, en tres palabras y sin coste de red."""
+    if entrada.confidence == INFERRED:
+        return " " + MARCA_INFERIDO
+    return " " + MARCA_DICHO
+
+
+def render_disputa(disputados: list[MemoryEntry]) -> str:
+    """Sección de los recuerdos en disputa, con la orden de preguntar.
+
+    Es la parte de la Fase 2 que evita el peor fallo posible de una memoria: que
+    el sistema elija en silencio entre dos versiones y el usuario no se entere.
+    Aquí no decide nadie: la sección le dice al modelo que pregunte.
+    """
+    lineas = [recortar(e.text, 200) for e in (disputados or [])][:4]
+    if not lineas:
+        return ""
+    cuerpo = "\n".join(f"- {t}" for t in lineas)
+    return (
+        f"{DISPUTA_HEADING}\n{cuerpo}\n"
+        "El usuario ha corregido alguno de estos datos y hay versiones que no "
+        "caben juntas. NO elijas una ni las des por ciertas: si el turno necesita "
+        "alguno de ellos, pregunta al usuario cuál vale antes de responder."
+    )
 
 
 class GraphBackend(MemoryBackend):
@@ -349,13 +382,40 @@ if l["source"] != entry_id and l["target"] != entry_id
         return True
 
     def marcar_disputa(self, entry_id: str, disputado: bool = True) -> bool:
-        """Sube o baja la bandera ``contested`` de un recuerdo."""
+        """Sube o baja la bandera ``contested`` de un recuerdo.
+
+        NO escribe a disco. La bandera es una pista blanda y quien la pone va en
+        el camino crítico del turno: escribir el grafo entero por una bandera
+        costaba 300 ms con la memoria real (medido con 1425 nodos, 3 MB), y eso
+        es una parada visible en medio de la voz. La bandera queda en memoria y
+        sale a disco al cerrar el turno, que es cuando la app llama a
+        ``_vaciar_pendientes()``.
+
+        Para marcar muchas de golpe, que es lo que hace el barrido de
+        contradicciones, está ``marcar_disputas``.
+        """
         with self._lock:
             if entry_id not in self._idx:
                 return False
             self._grafo["nodes"][self._idx[entry_id]]["contested"] = disputado
-            self._persistir()
+            self._persistir(urgente=False)
         return True
+
+    def marcar_disputas(self, entry_ids) -> int:
+        """Marca un conjunto de recuerdos en disputa y escribe UNA vez.
+
+        El barrido de contradicciones puede encontrar decenas de pares. Escribir
+        el grafo por cada marca era el fallo de la primera versión; aquí se
+        acumulan todas y se serializa una sola vez al final.
+        """
+        con_llaves = [i for i in (entry_ids or []) if i in self._idx]
+        if not con_llaves:
+            return 0
+        with self._lock:
+            for ident in con_llaves:
+                self._grafo["nodes"][self._idx[ident]]["contested"] = True
+            self._persistir(urgente=True)
+        return len(con_llaves)
 
     def archivar(self, entradas) -> None:
         """El grafo no archiva: nada se queda fuera, se marca como permanente."""
@@ -378,6 +438,89 @@ if l["source"] != entry_id and l["target"] != entry_id
     def export(self) -> str:
         with self._lock:
             return json.dumps(self._grafo, ensure_ascii=False, indent=2)
+
+    # -------------------------------------------------------------- auditoría
+    # Las tres de aquí responden a "de dónde sacas eso" y "olvida esto", que son
+    # las dos preguntas que la memoria en grafo puede contestar y una lista plana
+    # no. Van sobre el mismo grafo y el mismo índice, así que no hay segundo
+    # sitio donde buscar ni coste doble.
+    def _candidatos(self) -> list[dict]:
+        """Nodos que son recuerdos (no etiquetas), listos para puntuarse."""
+        with self._lock:
+            return [
+                n
+                for n in self._grafo["nodes"]
+                if n.get("kind") in ("brief", "permanent")
+            ]
+
+    def buscar(self, texto: str, limite: int = 8) -> list[MemoryEntry]:
+        """Ordena los recuerdos por parecido con ``texto``.
+
+        Solo relevancia, sin los bonus de recencia y refuerzo: aquí se pregunta
+        "¿qué dice la memoria sobre esto?", y un recuerdo viejo pero exacto tiene
+        que ganar a uno nuevo que no tiene nada que ver.
+        """
+        terminos = palabras(texto) if (texto or "").strip() else set()
+        if not terminos:
+            return []
+        puntuados = []
+        for nodo in self._candidatos():
+            rel = self._relevancia(nodo, terminos)
+            if rel > 0.0:
+                puntuados.append((rel, nodo))
+        puntuados.sort(key=lambda par: -par[0])
+        return [self._a_entry(n) for _, n in puntuados[:limite]]
+
+    def _cobertura(self, nodo: dict, terminos: set[str]) -> float:
+        """¿Cuántos términos del tema aparecen en este recuerdo?
+
+        No se reusa ``_relevancia`` a propósito. La relevancia mide "este
+        recuerdo sirve para responder a esta pregunta" y normaliza por la
+        longitud del texto, así que "el perro" puntúa 0,25 sobre un recuerdo de
+        cuatro palabras: al revés de lo que hace falta para borrar. Aquí lo que
+        importa es "¿habla de esto?", y eso es cobertura: cuántos de los términos
+        del tema aparecen. Uno solo de dos no basta, que es lo que evita que
+        "olvida Python y Rust" se lleve la memoria de Python.
+        """
+        if not terminos:
+            return 0.0
+        texto = nodo.get("description") or nodo.get("label") or ""
+        comunes = terminos & palabras(texto)
+        if not comunes:
+            return 0.0
+        return len(comunes) / len(terminos)
+
+    def forget_matching(self, texto: str, limite: int = 8) -> list[str]:
+        """Borra los recuerdos que hablan de ``texto`` y devuelve sus textos.
+
+        El corte es por cobertura (``_UMBRAL_OLVIDAR``): con un tema ("el perro")
+        caen los recuerdos del perro y no los de la tienda, que comparten una
+        palabra suelta pero no hablan de lo mismo.
+        """
+        terminos = palabras(texto) if (texto or "").strip() else set()
+        if not terminos:
+            return []
+        with self._lock:
+            victims = [
+                n
+                for n in self._candidatos()
+                if self._cobertura(n, terminos) >= _UMBRAL_OLVIDAR
+            ]
+            if not victims:
+                return []
+            textos = [n.get("description") or n.get("label") or "" for n in victims]
+            self._borrar_nodos(n["id"] for n in victims)
+            self._reindexar()
+            self._persistir()
+        logger.info("Memoria: %d recuerdo(s) olvidado(s) por tema.", len(textos))
+        return textos
+
+    def en_disputa(self) -> list[MemoryEntry]:
+        """Los recuerdos que el usuario contradijo y siguen sin resolverse."""
+        with self._lock:
+            return [
+                self._a_entry(n) for n in self._grafo["nodes"] if n.get("contested")
+            ]
 
     # -------------------------------------------------------------- lectura
     def _relevancia(self, nodo: dict, terminos: set[str]) -> float:
@@ -518,29 +661,43 @@ if l["source"] != entry_id and l["target"] != entry_id
         return resultado
 
     def block(self, query: str = "", presupuesto: int = BLOCK_BUDGET) -> str:
-        """Mismo formato que el plano, pero selecting lo relevante a la pregunta."""
+        """Mismo formato que el plano, pero se selecciona lo relevante a la pregunta.
+
+        Cada línea lleva su procedencia al final ("· tú lo dijiste" / "· deducido")
+        y las que están en disputa salen en su propia sección. Sin eso el modelo
+        recita datos sin poder decir de dónde los sacó, que es exactamente lo
+        que el usuario no puede auditar.
+
+        Un recuerdo en disputa **no** se repite: sale solo en su sección, con la
+        instrucción de preguntar. Si apareciera también en la lista normal, el
+        modelo leería la misma línea dos veces y con dos instrucciones
+        distintas, y en la práctica gana la que vio antes.
+        """
         entradas = self.retrieve(query, limite=8, presupuesto=presupuesto)
         if not entradas:
             return ""
         secciones: list[str] = []
-        permanentes = [e for e in entradas if e.kind == "permanent"]
-        breves = [e for e in entradas if e.kind != "permanent"]
+        disputados = [e for e in entradas if e.contested]
+        firmes = [e for e in entradas if not e.contested]
+        permanentes = [e for e in firmes if e.kind == "permanent"]
+        breves = [e for e in firmes if e.kind != "permanent"]
 
         if permanentes:
             lineas = []
             for e in permanentes:
                 texto = e.text if len(e.text) <= 600 else e.text[:600] + "…"
-                marca = " (discutido)" if e.contested else ""
-                lineas.append(f"- {texto}{marca}")
+                lineas.append(f"- {texto}{_marca(e)}")
             secciones.append(PERMANENT_HEADING + "\n" + "\n".join(lineas))
         if breves:
             lineas = []
             for e in breves:
                 texto = recortar(e.text)
                 quien = "usuario" if e.role == "user" else "MindVoice"
-                marca = " (discutido)" if e.contested else ""
-                lineas.append(f"- {quien}: {texto}{marca}")
+                lineas.append(f"- {quien}: {texto}{_marca(e)}")
             secciones.append(BRIEF_HEADING + "\n" + "\n".join(lineas))
+        nota_disputa = render_disputa(disputados)
+        if nota_disputa:
+            secciones.append(nota_disputa)
         return "\n\n".join(secciones)
 
     # ------------------------------------------------------------------ diagnóstico

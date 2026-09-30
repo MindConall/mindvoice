@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from memory.base import MemoryEntry
 from memory.graph_backend import GraphBackend
@@ -20,8 +21,10 @@ from memory.work_memory import (
     UTIL,
     MemoriaTrabajo,
     Traza,
+    detectar_chocque,
     detectar_contradicciones,
     detectar_perfil,
+    es_correccion,
     lecciones,
     nota_ampliada,
     render_lecciones,
@@ -195,6 +198,141 @@ class TestContradicciones(BaseTemporal):
 
     def test_no_falla_si_no_es_un_grafo(self) -> None:
         self.assertEqual(detectar_contradicciones(None), [])
+
+    def test_el_barrido_esta_acotado(self) -> None:
+        """El barrido completo tiene que parar, aunque haya muchos temas.
+
+        La versión anterior comparaba todos los pares de todos los nodos: con la
+        memoria real del usuario (1418 nodos) eso es un millón de comparaciones
+        y no cabe en el arranque. Aquí se comprueba que el tope se respeta.
+        """
+        g = self.grafo()
+        for i in range(400):
+            g.remember(f"Nota numero {i} sobre el tema {i} distinto", tags=[f"t{i}"])
+        with mock.patch("memory.work_memory.PARES_MAX", 50):
+            encontrados = detectar_contradicciones(g)
+        self.assertEqual(encontrados, [])
+        # Y aun con el tope durísimo, sigue sin colgarse:
+        with mock.patch("memory.work_memory.PARES_MAX", 10_000_000):
+            self.assertIsInstance(detectar_contradicciones(g), list)
+
+    def test_solo_compara_con_los_vecinos(self) -> None:
+        """Con ``solo`` solo se mira a los vecinos del nodo indicado."""
+        g = self.grafo()
+        g.remember("Tengo un perro que se llama Nube")
+        g.remember("Tengo un perro que se llama Bigotes", tags=["perro"])
+        nodo = [n for n in g._grafo["nodes"] if n.get("kind") == "brief"][-1]
+        encontrados = detectar_contradicciones(g, solo=nodo["id"])
+        self.assertEqual(len(encontrados), 1)
+
+
+# ----------------------------------------------------------- choque en el turno
+class TestChoqueTurno(BaseTemporal):
+    """La vía que corre en el camino crítico del turno de texto."""
+
+    def grafo(self) -> GraphBackend:
+        return GraphBackend(self.tmp)
+
+    def test_avisa_cuando_lo_nuevo_choca(self) -> None:
+        g = self.grafo()
+        g.remember("Tengo un perro que se llama Nube")
+        nota = detectar_chocque(g, "Tengo un perro que se llama Bigotes")
+        self.assertIn("AVISO DE MEMORIA", nota)
+        self.assertIn("pregunta", nota.lower())
+
+    def test_marca_el_recuerdo_anterior_en_disputa(self) -> None:
+        g = self.grafo()
+        g.remember("Tengo un perro que se llama Nube")
+        detectar_chocque(g, "Tengo un perro que se llama Bigotes")
+        self.assertEqual(len([n for n in g._grafo["nodes"] if n.get("contested")]), 1)
+
+    def test_no_avisa_si_no_choca_nada(self) -> None:
+        g = self.grafo()
+        g.remember("Tengo un perro que se llama Nube")
+        g.remember("El proyecto de la tienda va con Python")
+        self.assertEqual(detectar_chocque(g, "Mañana tengo una reunión a las nueve"), "")
+
+    def test_repetir_lo_mismo_no_es_un_choque(self) -> None:
+        g = self.grafo()
+        g.remember("Tengo un perro que se llama Nube")
+        self.assertEqual(detectar_chocque(g, "Tengo un perro que se llama Nube"), "")
+
+    def test_sin_grafo_no_pasa_nada(self) -> None:
+        self.assertEqual(detectar_chocque(None, "Tengo un perro que se llama X"), "")
+        self.assertEqual(detectar_chocque(self.grafo(), ""), "")
+
+    def test_el_choque_del_turno_no_rewrite_el_grafo(self) -> None:
+        """Marcar una disputa no puede costar medio segundo en medio de la voz.
+
+        El fallo era sutil y carísimo: ``marcar_disputa`` llamaba a ``_persistir``
+        sin más, así que reescribía el JSON entero del grafo por poner una
+        bandera booleana. Con la memoria real (1425 nodos, 3 MB) medido: 345 ms
+        por turno. Con la escritura aplazada: 2 ms. Por eso ``marcar_disputa`` no
+        escribe y quien marca muchas, ``marcar_disputas``, escribe una vez.
+        """
+        g = self.grafo()
+        g.remember("Tengo un perro que se llama Nube")
+        g.remember("el proyecto de la tienda va con Python")
+        with mock.patch.object(
+            g, "_persistir", wraps=g._persistir
+        ) as persistir:
+            detectar_chocque(g, "Tengo un perro que se llama Bigotes")
+        aplazadas = [
+            c for c in persistir.call_args_list if c.kwargs.get("urgente") is False
+        ]
+        self.assertTrue(
+            aplazadas,
+            "marcar una disputa escribió a disco: es lo que costaba 345 ms por turno",
+        )
+        self.assertFalse(
+            [c for c in persistir.call_args_list if not c.kwargs],
+            "hubo una escritura urgente por una sola bandera de disputa",
+        )
+
+    def test_el_barrido_marca_todas_de_una_vez(self) -> None:
+        """Varias marcas, una escritura: por marca el grafo entero."""
+        g = self.grafo()
+        g.remember("Tengo un perro que se llama Nube")
+        g.remember("Tengo un perro que se llama Bigotes")
+        g.remember("Tengo un perro que se llama Chispa")
+        with mock.patch.object(
+            g, "marcar_disputas", wraps=g.marcar_disputas
+        ) as batch:
+            detectar_contradicciones(g)
+        batch.assert_called_once()
+
+
+# ----------------------------------------------------------------- correcciones
+class TestCorreccion(unittest.TestCase):
+    """Es la única señal donde el usuario dice que la app se equivocó."""
+
+    def test_detecta_las_marcas_obvias(self) -> None:
+        for frase in (
+            "no, no es Bigotes, es Nube",
+            "eso no es verdad",
+            "te equivocas, es 2024",
+            "incorrecto",
+            "en realidad es 2025",
+            "corrijo: son las tres",
+        ):
+            with self.subTest(frase=frase):
+                self.assertTrue(es_correccion(frase))
+
+    def test_no_detecta_conversacion_normal(self) -> None:
+        for frase in (
+            "¿qué hora es?",
+            "pon un temporizador de diez minutos",
+            "mi perro se llama Nube",
+            "busca el tiempo en Madrid",
+            "",
+        ):
+            with self.subTest(frase=frase):
+                self.assertFalse(es_correccion(frase))
+
+    def test_mensajes_largos_no_se_cuentan(self) -> None:
+        """Un párrafo que Mentiona 'no, es' no es una rectificación."""
+        largo = "no, " + ("y entonces le dije que " * 40)
+        self.assertFalse(es_correccion(largo))
 
 
 # --------------------------------------------------------------------- perfil
