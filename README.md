@@ -178,8 +178,55 @@ de entorno o `config.py`:
 | `screen_quality` | `95` | Calidad JPEG (1–95). |
 | `web_search_enabled` | `True` | Buscar cuando la orden lo pide. |
 | `web_smart_detect` | `True` | Detector por IA de "esto necesita datos actuales". |
-| `web_search_provider` | `duckduckgo` | Motor de búsqueda. Alternativas: `serper`, `searxng`, `wikipedia`, `brave`, `google`, `tavily`, `serpapi`. Las que piden clave se configuran en Ajustes. |
+| `web_search_provider` | `serper` si hay `SERPER_API_KEY`, si no `duckduckgo` | Motor de búsqueda. Solo existen esos dos: `duckduckgo` (gratis, sin clave) y `serper` (2.500/mes gratis, necesita clave). Un valor antiguo o desconocido cae al motor por defecto real, no se queda sin motor. |
+| `web_search_model` | `gemini-3.6-flash` | Modelo REST que busca y clasifica. Si tu API no lo sirve, la app lo avisa y prueba el siguiente de la lista. Ver abajo. |
+| `MINDVOICE_WEB_PROXY` | — | Proxy solo para las búsquedas web, si tu proveedor bloquea tu país. |
 | `session_resumption` | `False` | Reanudación de sesión (experimental; ver limitaciones). |
+
+Las variables de entorno van en un `.env` junto al ejecutable; copia
+[`.env.example`](.env.example) como plantilla. Ese archivo lista todas.
+
+---
+
+## Por qué mi IA suena distinta a la del autor
+
+Casi siempre es una de estas cinco. Están en orden de probabilidad real:
+
+**1. El plan y la cuota de tu clave (lo más habitual).** El modelo de búsqueda
+por defecto es `gemini-3.6-flash`, pero si tu clave no lo sirve (429 por cuota
+agotada, o un plan que no incluye ese nombre) la app baja al siguiente
+disponible. Si además no queda ninguno, **la búsqueda web se desactiva esa
+sesión** y el modelo responde solo de su memoria: ahí es donde "suena" peor.
+No lo adivines, está escrito: al arrancar salen cuatro líneas `(Arranque)` en
+el panel y en el log con el modelo, la versión de API, si hay clave y qué motor
+de búsqueda se usa. Si ves un aviso de que se usó un modelo de reserva, es esto.
+
+**2. `web_model_cache.json`.** Guarda el último modelo que funcionó para evitar
+llamar a la API en cada arranque. Si cambias de clave, de plan o de cuota, ese
+archivo se queda obsoleto y te sigue sirviendo el modelo viejo. Al arrancar se
+avisa cuando lo guardado no es el recomendado. Solución: borra el archivo y
+reinicia.
+
+**3. La memoria que no viaja en el repositorio.** `memory.json`,
+`memory-long.json` y `user_prefs.json` son **estado local, ignorado por git a
+propósito**: son tu conversación, tu vocabulario, tu motor elegido y tus claves.
+Un clon limpio arranca sin ellos, así que el asistente responde sin conocer tu
+contexto, sin tu léxico y con los valores de fábrica. No es un fallo: es que la
+calidad que notas incluye todo lo que la app aprendió de ti.
+
+**4. El país.** DuckDuckGo limita por IP y bloquea por región; serper.dev
+también puede devolver 403 desde algunos países. Si la búsqueda falla en
+cambio de clave, casi siempre es la IP de salida: prueba con `MINDVOICE_WEB_PROXY`.
+MindVoice distingue el bloqueo por país del problema de clave y lo dice.
+
+**5. El modelo de voz no es lo que esperas.** La voz sale de `voice`
+(`Puck` por defecto) y del `output_rate`. Si alguien tiene puesto
+`response_modalities` en `audio_text`, o una voz distinta, la respuesta suena
+distinta desde el primer segundo. Se cambia en Ajustes, no por código.
+
+En resumen: **el modelo de voz y las instrucciones son los mismos para todo el
+mundo**; lo que cambia por instalación es la cuota, la memoria acumulada, el
+motor de búsqueda y el país.
 
 ---
 
@@ -197,7 +244,7 @@ de entorno o `config.py`:
 - La búsqueda web con *grounding* de Google depende de la cuota del plan de tu
   clave. Con `429 RESOURCE_EXHAUSTED` el modelo responde desde su propio
   conocimiento avisando de que no pudo verificar el dato. Usar un motor externo
-  (Serper, SearXNG, Brave…) evita esa dependencia.
+  (serper.dev) evita esa dependencia.
 - Sin firma digital: SmartScreen salta en la primera ejecución.
 
 ---

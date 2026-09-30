@@ -9,6 +9,7 @@ del que ha usado. Corre: ``python test_web_engines.py``
 """
 
 import asyncio
+import os
 import unittest
 from unittest import mock
 
@@ -19,6 +20,19 @@ from config import (
     normalize_web_engine,
 )
 from live_assistant import LiveAssistant
+
+
+def sin_clave_serper():
+    """Entorno sin ``SERPER_API_KEY``, para no depender de la máquina."""
+    return mock.patch.dict(
+        os.environ,
+        {k: v for k, v in os.environ.items() if k != "SERPER_API_KEY"},
+        clear=True,
+    )
+
+
+def con_clave_serper():
+    return mock.patch.dict(os.environ, {"SERPER_API_KEY": "k"}, clear=True)
 
 
 def make_assistant(provider, **overrides):
@@ -46,10 +60,14 @@ class TestRegistry(unittest.TestCase):
     def test_only_ddg_and_serper_exist(self):
         self.assertEqual(set(WEB_ENGINES), {"duckduckgo", "serper"})
 
-    def test_ddg_is_first_and_default(self):
+    def test_ddg_es_el_defecto_sin_clave(self):
+        """El defecto REAL depende de si hay clave: serper si la hay, si no DDG."""
         self.assertEqual(DEFAULT_WEB_ENGINE, "duckduckgo")
         self.assertEqual(list(WEB_ENGINES)[0], "duckduckgo")
-        self.assertEqual(Settings().web_search_provider, "duckduckgo")
+        with sin_clave_serper():
+            self.assertEqual(Settings().web_search_provider, "duckduckgo")
+        with con_clave_serper():
+            self.assertEqual(Settings().web_search_provider, "serper")
 
     def test_no_removed_provider_is_referenced(self):
         blob = repr(WEB_ENGINES).lower()
@@ -57,8 +75,18 @@ class TestRegistry(unittest.TestCase):
             self.assertNotIn(gone, blob)
 
     def test_normalize_migrates_dead_values(self):
-        for dead in ("auto", "google", "tavily", "serpapi", "brave", "", None, "  "):
-            self.assertEqual(normalize_web_engine(dead), "duckduckgo")
+        # Sin clave, un valor muerto cae en DuckDuckGo.
+        with sin_clave_serper():
+            for dead in ("auto", "google", "tavily", "serpapi", "brave", "", None, "  "):
+                self.assertEqual(normalize_web_engine(dead), "duckduckgo")
+        # Con SERPER_API_KEY, el mismo valor muerto cae en serper (el defecto
+        # real), nunca se queda sin motor.
+        with con_clave_serper():
+            for dead in ("auto", "google", "tavily", "serpapi", "brave", "", None, "  "):
+                self.assertEqual(normalize_web_engine(dead), "serper")
+        # Un valor válido manda siempre, tenga clave o no.
+        with con_clave_serper():
+            self.assertEqual(normalize_web_engine("duckduckgo"), "duckduckgo")
         self.assertEqual(normalize_web_engine("SERPER"), "serper")
         self.assertEqual(normalize_web_engine(" duckduckgo "), "duckduckgo")
 
@@ -106,10 +134,14 @@ class TestInvariant(unittest.TestCase):
         self.assertEqual(called, [], "no debe buscar en otro motor sin avisar")
         self.assertEqual(note, "")
 
-    def test_dead_value_in_config_uses_ddg(self):
-        a = make_assistant("tavily", serper_api_key="clave-falsa")
-        called, _ = self._run_search(a, "precio del dolar")
-        self.assertEqual(called, ["duckduckgo"])
+    def test_dead_value_in_config_uses_the_real_default(self):
+        # Sin SERPER_API_KEY en el entorno, el valor muerto cae en DuckDuckGo
+        # aunque la clave de serper esté puesta en Ajustes (el defecto lo decide
+        # el entorno, que es lo que cambia de instalación a instalación).
+        with sin_clave_serper():
+            a = make_assistant("tavily", serper_api_key="clave-falsa")
+            called, _ = self._run_search(a, "precio del dolar")
+            self.assertEqual(called, ["duckduckgo"])
 
     def test_label_and_spoken_follow_the_selection(self):
         for chosen, spoken in (("duckduckgo", "DuckDuckGo"), ("serper", "serper.dev")):

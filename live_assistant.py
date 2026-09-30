@@ -58,6 +58,7 @@ from google.genai import types
 from config import (
     Settings,
     WEB_ENGINES,
+    WEB_SEARCH_MODEL,
     engine_key_env,
     engine_key_field,
     engine_needs_key,
@@ -632,21 +633,22 @@ _WEB_CLASSIFY_PROMPT = (
 # la resolución automática (``_web_model_name``) recorre los candidatos hasta
 # encontrar el primero que de verdad responde texto. OJO: los ``*-preview`` de la
 # serie 3.1 están APAGADOS (dejaron de servirse en 2026) y devolvían 404/503
-# una y otra vez, así que fuera. Se prioriza la familia GA vigente y, al final,
-# un ``-lite`` barato como red de seguridad.
+# una y otra vez, así que fuera.
+#
+# ORDEN POR CALIDAD, NO POR DISPONIBILIDAD DE UNA KEY. Antes esta lista ponía
+# ``-lite`` PRIMERO porque con la clave del autor los ``3.5-3.8-flash`` devolvían
+# 429; consecuencia: un clon limpio (o el mismo, con otra cuota) arrancaba en el
+# modelo más barato y respondía peor, sin ningún aviso. Ahora el pin documentado
+# va primero y la red barata queda AL FINAL, solo si nada más sirve.
 _WEB_MODEL_FALLBACKS = (
-    # OJO 2026-09: medido con esta API key, ``gemini-3.8/3.7/3.6/3.5-flash``
-    # devuelven 429 (sin cuota) y solo ``3.1-flash-lite`` respondió 200. Por eso
-    # va PRIMERO: antes se probaban los cuatro que fallan y la resolución se
-    # gastaba 5-6 llamadas en cada arranque (con 429 de por medio).
-    "gemini-3.1-flash-lite",
-    "gemini-3.6-flash",
+    WEB_SEARCH_MODEL,
     "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.5-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash",
     "gemini-flash-latest",
+    # Red de seguridad barata: solo si el plan no sirve ningún flash GA.
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
 )
 # Presupuesto total para resolver el modelo REST (probes en serie). La
 # resolución corre en segundo plano al arrancar (pre-warm), pero el límite
@@ -1645,6 +1647,12 @@ class LiveAssistant:
         self._turn_begin = None
         self._turn_first_audio = None
         self._cont_remaining = 0
+        # El contador de reenvíos pertenece al turno que se acaba de abandonar.
+        # Sin este rearme, ``_watchdog_loop`` (que exige ``< 1``) se quedaba sin
+        # reenvío de voz para TODOS los turnos siguientes de la sesión: el primer
+        # estancamiento gastaba el único intento y la única recuperación existente
+        # quedaba muerta hasta reiniciar la app.
+        self._voice_replay_tries = 0
         self._set_state(
             AssistantState.LISTENING
             if self._voice_active()
@@ -1869,6 +1877,7 @@ class LiveAssistant:
             async def _prewarm_web_model() -> None:
                 await self._web_model_name()
 
+            self._startup_diagnostics()
             if self._settings.web_search_enabled:
                 warm = asyncio.create_task(_prewarm_web_model())
                 self._web_warm_task = warm
@@ -3101,6 +3110,18 @@ class LiveAssistant:
                     if cached:
                         logger.info("Modelo web de la caché: %s", cached)
                         self._web_model = cached
+                        # La caché evita 5-6 llamadas en cada arranque, pero se
+                        # queda obsoleta si cambias de clave, de plan o de
+                        # versión. Decirlo es la diferencia entre "mi clon suena
+                        # peor" y "sé por qué".
+                        if cached != WEB_SEARCH_MODEL:
+                            self._safe_call(
+                                self.on_meta,
+                                f"(Web) Búsqueda con «{cached}» (modelo guardado "
+                                f"en web_model_cache.json, NO el recomendado "
+                                f"«{WEB_SEARCH_MODEL}»): si notas las respuestas "
+                                "peores que antes, borra ese archivo y reinicia.",
+                            )
                         return
                 # Candidatos "curados" PRIORITARIOS: nombres que en 2026 siguen
                 # respondiendo en este plan (los ``-2.5-flash``/``-3.1-flash``
@@ -3170,6 +3191,23 @@ class LiveAssistant:
                         self._web_model = name
                         _save_cached_web_model(name)
                         logger.info("Modelo web resuelto: %s", name)
+                        # Degradación visible: si el pin documentado no está
+                        # disponible para esta clave/plan, se avisa en pantalla.
+                        # Antes solo quedaba en el log y el usuario no tenía
+                        # forma de saber por qué su clon respondía peor.
+                        if name != WEB_SEARCH_MODEL:
+                            self._safe_call(
+                                self.on_meta,
+                                f"(Web) Tu API no sirve «{WEB_SEARCH_MODEL}» para "
+                                f"búsqueda; se usa «{name}» como reserva"
+                                + (
+                                    " (más barato: puede responder peor)."
+                                    if "lite" in name
+                                    else "."
+                                )
+                                + " Si quieres el de serie, revisa tu plan o "
+                                "pon web_search_model en Ajustes.",
+                            )
                         return
                     except Exception as exc:  # noqa: BLE001 - siguiente candidato
                         if _is_network_error(exc):
@@ -3190,15 +3228,32 @@ class LiveAssistant:
                             "temporales): se reintentará en la siguiente "
                             "búsqueda."
                         )
+                        self._safe_call(
+                            self.on_meta,
+                            "(Web) No se pudo comprobar el modelo de búsqueda "
+                            "(problema de red, no de clave): la búsqueda web "
+                            "puede ir a ciegas hasta que vuelva la conexión.",
+                        )
                         return
                     logger.warning(
                         "Ningún modelo REST respondió (búsqueda web desactivada "
                         "esta sesión). Configura 'web_search_model' con uno "
                         "válido."
                     )
+                    self._safe_call(
+                        self.on_meta,
+                        "(Web) Ningún modelo respondió para buscar: la búsqueda "
+                        "web queda DESACTIVADA esta sesión. Suele ser el plan de "
+                        "tu clave. Revisa GEMINI_API_KEY o pon "
+                        "web_search_model en Ajustes.",
+                    )
                     self._web_model_exhausted = True
             except Exception as exc:  # noqa: BLE001 - sin búsqueda, la app sigue igual
                 logger.warning("Resolución del modelo web falló: %s", exc)
+                self._safe_call(
+                    self.on_meta,
+                    f"(Web) La resolución del modelo de búsqueda falló: {exc}",
+                )
                 # Un fallo de RED no agota la resolución: la red puede volver.
                 if not _is_network_error(exc):
                     self._web_model_exhausted = True
@@ -3409,6 +3464,41 @@ class LiveAssistant:
         """¿Es este proveedor el que la config elegiría en primer lugar?"""
         return self.current_engine() == provider
 
+    def _startup_diagnostics(self) -> None:
+        """Deja por escrito con qué configuración arranca la app.
+
+        Existe para que "mi IA suena distinta a la del autor" se pueda
+        diagnosticar SIN adivinar: modelo de voz, versión de API, clave,
+        motor de búsqueda y modelo de búsqueda. Va al log (para adjuntarlo a
+        un bug) y al overlay (para verlo sin abrir ficheros).
+        """
+        clave = (getattr(self._settings, "api_key", "") or "").strip()
+        motor = WEB_ENGINES[self.current_engine()]["label"]
+        lineas = [
+            f"(Arranque) Voz: {self._settings.model} · API "
+            f"{self._settings.api_version}",
+            "(Arranque) Clave de API: " + ("presente" if clave else "AUSENTE"),
+            "(Arranque) Búsqueda web: "
+            + ("activada" if self._settings.web_search_enabled else "desactivada")
+            + f" · motor: {motor}",
+            f"(Arranque) Modelo de búsqueda: {WEB_SEARCH_MODEL}",
+        ]
+        if not self._settings.web_search_enabled:
+            lineas[-1] += " (no se usa mientras la búsqueda esté desactivada)"
+        elif self.current_engine() == "duckduckgo":
+            lineas[-2] += (
+                " — sin clave: DuckDuckGo limita por IP y sus resultados suele "
+                "ser peores; con SERPER_API_KEY se usa serper.dev"
+            )
+        if self._settings.web_search_model:
+            lineas[-1] = (
+                f"(Arranque) Modelo de búsqueda: {self._settings.web_search_model}"
+                " (forzado en Ajustes, sustituye al pin de fábrica)"
+            )
+        for linea in lineas:
+            logger.info(linea)
+            self._safe_call(self.on_meta, linea)
+
     async def _probe_active_provider(self, provider: str) -> None:
         """Verifica al arrancar que la clave del proveedor web principal vale.
 
@@ -3432,9 +3522,11 @@ class LiveAssistant:
             )
             self._safe_call(
                 self.on_meta,
-                "(Web) DuckDuckGo configurado (gratis, sin clave): se "
-                "probará en tu primera búsqueda. Si no responde, se reintenta "
-                "con la versión lite automáticamente.",
+                "(Web) DuckDuckGo como motor de búsqueda (gratis, sin clave): "
+                "se probará en tu primera búsqueda. Ojo: limita por IP y sus "
+                "resultados suelen ser peores que los de serper.dev; si notas "
+                "respuestas flojas al buscar, define SERPER_API_KEY (2.500/mes "
+                "gratis) y reinicia.",
             )
             return
         key = self._provider_key(self._settings, provider)
@@ -5277,8 +5369,11 @@ class LiveAssistant:
             self._awaiting_turn = False
             # El turno ya está atendido: el audio guardado por si había que
             # reenviarlo deja de ser válido (si no, un estancamiento posterior
-            # reenviaría una frase vieja).
+            # reenviaría una frase vieja). El contador de intentos va con él: es
+            # de ESTE turno y, sin rearme, el watchdog quedaba sin reenvío de voz
+            # para el resto de la sesión en cuanto se usaba una vez.
             self._voice_replay = None
+            self._voice_replay_tries = 0
             # Usuario antes que modelo (ver nota en out_transcript).
             self._flush_input(session)
             self._flush_output()

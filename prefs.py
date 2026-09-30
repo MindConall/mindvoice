@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from config import DEFAULT_WEB_ENGINE, Settings, normalize_web_engine
+from config import Settings, normalize_web_engine
 from rutas import data_file
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,11 @@ DEFAULTS: Dict[str, Any] = {
     "screen_enabled": True,
     "overlay_opacity": 0.7,
     "overlay_max_lines": 60,
-    "web_search_provider": DEFAULT_WEB_ENGINE,
+    # ``None`` = el usuario NO ha escogido motor, así que decide
+    # ``default_web_engine()`` (serper si hay SERPER_API_KEY, si no
+    # DuckDuckGo). Guardar aquí "duckduckgo" a pelo fijaría el motor en un clon
+    # limpio aunque tuviera clave de serper puesta.
+    "web_search_provider": None,
     "serper_api_key": "",
     "web_smart_detect": True,
     "mute_mode": "toggle",

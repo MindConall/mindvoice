@@ -41,6 +41,15 @@ API_VERSION = "v1alpha"               # Canal Live usado por defecto. En v1beta 
                                       # Settings si quieres experimentar.
 API_BASE_URL = "generativelanguage.googleapis.com"
 
+# Modelo REST (generateContent) que se usa por defecto para la búsqueda web y el
+# detector inteligente. Es un pin deliberado: la resolución automática acababa
+# siempre en ``gemini-3.1-flash-lite`` (el más barato) porque la lista de
+# candidatos se había ordenado alrededor de los 429 de UNA clave concreta, así
+# que un clon limpio respondía peor que la máquina donde se configuró. Si tu
+# API no sirve este nombre, la app lo dice en pantalla y prueba el siguiente.
+# Se sobrescribe con ``web_search_model`` en Ajustes o en ``user_prefs.json``.
+WEB_SEARCH_MODEL = "gemini-3.6-flash"
+
 
 # ---------------------------------------------------------------------------
 # REGISTRO ÚNICO DE MOTORES DE BÚSQUEDA
@@ -79,16 +88,30 @@ WEB_ENGINES = {
 DEFAULT_WEB_ENGINE = "duckduckgo"
 
 
+def default_web_engine() -> str:
+    """Motor por defecto REAL, según lo que haya configurado el usuario.
+
+    Con clave de serper.dev se usa serper (resultados de Google, 2.500/mes
+    gratis); sin ella, DuckDuckGo, para que un clon limpio funcione sin
+    configurar nada. Solo decide el punto de partida cuando el usuario no ha
+    escogido motor: nunca sustituye al elegido en Ajustes.
+    """
+    if (os.environ.get("SERPER_API_KEY") or "").strip():
+        return "serper"
+    return DEFAULT_WEB_ENGINE
+
+
 def normalize_web_engine(value: Optional[str]) -> str:
     """Normaliza a una clave válida del registro (si no, el motor por defecto).
 
     Todo lo que venga de Ajustes, de un JSON de preferencias o de una variable
     de entorno pasa por aquí, así que un valor desconocido o de un proveedor
-    eliminado (tavily, serpapi, brave, "auto"…) cae en DuckDuckGo en vez de
-    dejar la app en un estado inconsistente sin motor.
+    eliminado (tavily, serpapi, brave, "auto"…) cae en el motor por defecto real
+    (``default_web_engine``) en vez de dejar la app en un estado inconsistente
+    sin motor.
     """
     v = (value or "").strip().lower()
-    return v if v in WEB_ENGINES else DEFAULT_WEB_ENGINE
+    return v if v in WEB_ENGINES else default_web_engine()
 
 
 def engine_label(key: str) -> str:
@@ -323,20 +346,20 @@ class Settings:
     # solo los disparadores explícitos (algo más rápido, menos ávido).
     web_smart_detect: bool = True
     # Modelo REST (generateContent) usado para buscar y para el detector
-    # inteligente. ``None`` = resolver automáticamente: la app recorre los
-    # nombres vigentes (``gemini-3.x-flash``…) y los modelos reales que
-    # devuelve tu API (``models.list``) usando el primero de texto que
-    # responde, y lo recuerda para el resto de la sesión. Pon uno concreto
-    # (p. ej. "gemini-3.1-flash-lite") si quieres forzar uno. En 2026 los
-    # ``gemini-2.5-flash``/``gemini-2.0-flash`` dan 404 "no longer available
-    # to new users": no los uses como override.
+    # inteligente. ``None`` = automático: se usa el pin documentado
+    # ``WEB_SEARCH_MODEL`` y, si tu API no lo sirve, se avisa en pantalla y se
+    # prueba el siguiente de la lista. Pon uno concreto aquí para forzar otro
+    # (p. ej. "gemini-3.1-flash-lite"). En 2026 los ``gemini-2.5-flash``/
+    # ``gemini-2.0-flash`` dan 404 "no longer available to new users": no los
+    # uses como override.
     web_search_model: Optional[str] = None
     # Proveedor real de los resultados web. El "grounding de Google Search"
     # (generateContent con la herramienta) es cómodo pero consume una CUOTA
     # Motor de búsqueda. Los valores válidos son las claves de ``WEB_ENGINES``
     # (abajo). El menú, la petición real, la nota y el anuncio al modelo salen
-    # TODOS de ese registro, así que no pueden discrepar entre sí.
-    web_search_provider: str = DEFAULT_WEB_ENGINE
+    # TODOS de ese registro, así que no pueden discrepar entre sí. Por defecto
+    # se usa serper si hay ``SERPER_API_KEY`` y DuckDuckGo si no.
+    web_search_provider: str = field(default_factory=default_web_engine)
     # Proxy opcional SOLO para las búsquedas web.
     # Útil cuando tu proveedor bloquea tu país. Déjalo en ``None`` para usar los
     # proxies del entorno (HTTPS_PROXY/ALL_PROXY) o conexión directa. Formato:

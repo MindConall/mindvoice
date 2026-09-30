@@ -81,6 +81,7 @@ from config import (
     DEFAULT_WEB_ENGINE,
     Settings,
     WEB_ENGINES,
+    default_web_engine,
     normalize_web_engine,
 )
 from hotkeys import HotkeyController
@@ -1730,7 +1731,7 @@ class OverlayHud(QWidget):
         self._select_combo_value(self._lang_combo, "es-ES")
         self._opacity_slider.setValue(70)
         self._select_combo_value(self._lines_combo, 60)
-        self._select_combo_value(self._web_provider_combo, DEFAULT_WEB_ENGINE)
+        self._select_combo_value(self._web_provider_combo, default_web_engine())
         self._api_key_edit.clear()
         self._sync_api_key_visibility()
         self._smart_check.setChecked(True)
