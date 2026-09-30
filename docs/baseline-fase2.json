@@ -22,9 +22,9 @@
   "veredicto": "35,7 ms de arranque es invisible; 1,7 ms por turno es despreciable junto a la latencia de red de un turno de voz. Las dos cifras bajan mas de 70x respecto a la primera version.",
   "pruebas": {
     "ficheros": 9,
-    "tests": 230,
-    "pasan": 229,
-    "fallan": 1,
-    "fallo_conocido": "test_ui_tokens.py::TestRendimientoAnimaciones::test_diez_animaciones_no_se_acumulan_en_el_bucle (AssertionError: 1 != 0). Es de la Fase 3, anterior a este trabajo y sin relacion con el."
+    "tests": 232,
+    "pasan": 232,
+    "fallan": 0,
+    "nota": "Suite completa en verde tras arreglar la fuga de animaciones de la Fase 3. Antes 229 de 230, con test_diez_animaciones_no_se_acumulan_en_el_bucle roto desde antes de este trabajo."
   }
 }

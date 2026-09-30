@@ -457,6 +457,46 @@ class TestRendimientoAnimaciones(unittest.TestCase):
         # Sin excepción, el contador vuelve a su punto de partida.
         self.assertEqual(animaciones_vivas(), antes)
 
+    def test_una_animacion_recuperada_en_el_garbage_devuelve_la_cuenta(self) -> None:
+        """El caso que hacía fallar al de arriba, y que no se ve por casualidad.
+
+        En el bucle anterior, cada vuelta suelta la referencia al widget y a la
+        animación anteriores, así que el recolector puede llevárselos EN MEDIO de
+        la animación. Si la baja de la cuenta dependía de la envoltura de Python
+        (``self.destroyed``), al morir en pleno vuelo no llegaba el aviso y la
+        cuenta se quedaba colgada para siempre: el contador era entonces un
+        número que solo sabía subir.
+
+        Aquí se fuerza la recogida con ``gc.collect()`` en cada vuelta, que es
+        justo lo que pasa de verdad cuando el HUD va creando y soltando paneles.
+        El fallo era intermitente (11 de 12 ejecuciones en el test de arriba), y
+        esto lo hace determinista.
+        """
+        import gc
+
+        antes = animaciones_vivas()
+        for _ in range(10):
+            w = _Contador()
+            w.resize(60, 20)
+            f = Fade(w, 0.0, 1.0, 60)
+            f.start()
+            gc.collect()
+            self.drenar(0.02)
+        gc.collect()
+        self.drenar(0.3)
+        gc.collect()
+        self.assertEqual(animaciones_vivas(), antes)
+
+    def test_el_contador_no_baja_de_cero(self) -> None:
+        """Darle la baja dos veces no puede dejar el contador en negativo."""
+        antes = animaciones_vivas()
+        anim = Fade(self.widget(), 0.0, 1.0, 60)
+        anim.start()
+        anim.stop()
+        anim.stop()
+        anim._descontar()
+        self.assertGreaterEqual(animaciones_vivas(), antes)
+
 
 if __name__ == "__main__":
     unittest.main()

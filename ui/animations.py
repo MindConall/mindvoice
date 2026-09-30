@@ -48,17 +48,30 @@ from . import tokens
 
 logger = logging.getLogger(__name__)
 
-# Contador de animaciones vivas, para poder assertar en los tests que no se
-# acumulan (una fuga aquí se ve como el HUD consumiendo CPU con la ventana
-# cerrada).
-_ANIMACIONES_VIVAS = 0
+# Las animaciones en marcha, para poder assertar en los tests que no se acumulan
+# (una fuga aquí se ve como el HUD consumiendo CPU con la ventana cerrada).
+#
+# Es un CONJUNTO y no un entero, y esa es la parte importante. Con un entero
+# sumando y restando, cada baja tiene que acertar: si el aviso de "ya terminó" no
+# llega, la cuenta se cuelga para siempre y no hay forma de arreglarlo a posteriori
+# sin reiniciar el módulo. Un conjunto hace la operación idempotente: da igual
+# que llegue el aviso una vez, dos o ninguna, el resultado es el mismo.
+#
+# Y se guarda el objeto de Qt, no su ``id``: el ``id`` de un objeto ya destruido
+# puede acabar en un objeto nuevo, y un ``discard`` con el número suelto borraría
+# la cuenta de una animación viva. Con el objeto, la identidad no se puede
+# confundir. Lo que se guarda es la envoltura de Python, que no impide que Qt
+# destruya el objeto cuando su padre (el widget) muere: el ``destroyed`` de
+# abajo es quien la saca, y por eso está conectado a una función suelta y no a un
+# método, para que no dependa de que esa envoltura siga viva.
+_ANIMACIONES_VIVAS: set = set()
 
 # Por debajo de esto la opacidad se considera "opaco" y el efecto se retira.
 _OPACO = 0.999
 
 
 def animaciones_vivas() -> int:
-    return _ANIMACIONES_VIVAS
+    return len(_ANIMACIONES_VIVAS)
 
 
 def _curve(nombre: str) -> QEasingCurve:
@@ -181,7 +194,7 @@ class _Opacidad:
 
 
 def _descontar_al_destruirse(objeto) -> None:
-    """Si el widget muere en mitad de la animación, la cuenta se devuelve igual.
+    """Si la animación entera muere, la cuenta se devuelve igual.
 
     ``finished`` solo salta si la animación llega al final. Si el widget que se
     está fundiendo desaparece a mitad (el HUD cerrando un panel), nunca salta y
@@ -191,6 +204,19 @@ def _descontar_al_destruirse(objeto) -> None:
     contar = getattr(objeto, "_contando", False)
     if contar:
         objeto._descontar()
+
+
+def _olvidar_si_muere(anim) -> None:
+    """Saca del recuento una animación que ha muerto sin terminar.
+
+    Va conectada al ``destroyed`` de la animación, que es una señal de C++ y se
+    emite aunque nobody en Python la esté mirando. Antes la baja dependía de
+    ``self.destroyed``, o sea de que la envoltura de Python siguiera viva: con el
+    recolector de basura en medio de un bucle de widgets, eso no está garantizado
+    y la cuenta se colgaba de forma intermitente. Medido: el test de "diez
+    animaciones a la vez" fallaba 11 veces de 12, según cuándo pasara el GC.
+    """
+    _ANIMACIONES_VIVAS.discard(anim)
 
 
 class _AnimacionOpacidad(QObject):
@@ -222,19 +248,21 @@ class _AnimacionOpacidad(QObject):
         # animación vive lo que su contenedor, y se puede repetir.
         self._anim.finished.connect(self._al_terminar)
         self._anim.finished.connect(self.finished)
+        # La baja se conecta a la animación, no al ``self`` de Python: así llega
+        # aunque el recolector se lleve la envoltura por delante. Ver
+        # ``_olvidar_si_muere``.
+        self._anim.destroyed.connect(_olvidar_si_muere)
         self.destroyed.connect(_descontar_al_destruirse)
 
     def _contar(self) -> None:
-        global _ANIMACIONES_VIVAS
         if not self._contando:
             self._contando = True
-            _ANIMACIONES_VIVAS += 1
+            _ANIMACIONES_VIVAS.add(self._anim)
 
     def _descontar(self) -> None:
-        global _ANIMACIONES_VIVAS
         if self._contando:
             self._contando = False
-            _ANIMACIONES_VIVAS = max(0, _ANIMACIONES_VIVAS - 1)
+            _ANIMACIONES_VIVAS.discard(self._anim)
 
     def _al_terminar(self) -> None:
         self._descontar()
@@ -242,7 +270,6 @@ class _AnimacionOpacidad(QObject):
         # el turno (terminada, interrumpida o parada a mano), el widget vuelve a
         # su estado normal.
         self._opacidad.soltar()
-
     def start(self) -> None:
         if not self._opacidad.animable:
             return
