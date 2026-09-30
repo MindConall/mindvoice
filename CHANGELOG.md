@@ -8,7 +8,7 @@ Este fichero es la fuente de las notas de cada release: el workflow de
 publicación lo lee y lo antepone a las instrucciones de instalación, así que
 **lo que no esté aquí, la release no lo dirá**.
 
-## [No publicado]
+## [0.1.2] - 2026-09-30
 
 ### Añadido
 
@@ -134,6 +134,7 @@ migrarse encima de los ajustes actuales si se borraba la carpeta de datos.
 - No hay migraciones de datos. Tus ajustes, memoria y transcripciones se
   mantienen tal cual.
 
-[No publicado]: https://github.com/MindConall/mindvoice/compare/v0.1.1...HEAD
+[No publicado]: https://github.com/MindConall/mindvoice/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/MindConall/mindvoice/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/MindConall/mindvoice/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/MindConall/mindvoice/releases/tag/v0.1.0
